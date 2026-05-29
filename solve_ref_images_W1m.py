@@ -317,6 +317,10 @@ def check_wcs_corners(wcs_header, objects, catalog, frame_shape, check_tile_size
             objects['Y'] < v[3],
         ])
 
+        if not np.any(check_objects):
+            header[k] = -1
+            continue
+
         median = np.median(delta_xy[check_objects])
         header[k] = -1 if np.isnan(median) else median
 
@@ -417,6 +421,28 @@ def polynomial_from_header(wcs_header, axis, force3rd):
             coeffs['c' + key[2:]] = wcs_header[key]
 
     return models.Polynomial2D(degree=wcs_header[axis + '_ORDER'], **coeffs)
+
+
+def get_binning_from_header(header):
+    """
+    Read detector binning from the FITS header.
+    """
+    if 'CAM-BIN' in header:
+        try:
+            cam_bin = int(header['CAM-BIN'])
+            return cam_bin, cam_bin
+        except ValueError as exc:
+            raise ValueError(f"CAM-BIN value '{header['CAM-BIN']}' could not be parsed as an integer.") from exc
+
+    if 'HBIN_SZ' in header and 'VBIN_SZ' in header:
+        try:
+            return int(header['HBIN_SZ']), int(header['VBIN_SZ'])
+        except ValueError as exc:
+            raise ValueError(
+                f"HBIN_SZ='{header['HBIN_SZ']}' or VBIN_SZ='{header['VBIN_SZ']}' could not be parsed as integers."
+            ) from exc
+
+    return 1, 1
 
 
 def fit_zeropoint_polynomial(catalog, objects, exptime, degree=2, sigma=3.0):
@@ -655,7 +681,7 @@ def prepare_frame(input_path, output_path, catalog, defocus, force3rd, save_matc
                               dec=catalog_cm['DEC_CORR'] * u.degree)
 
         # Iteratively improve the cross-match, WCS fit, and ZP estimation
-        cam_bin = frame.header['HBIN_SZ']
+        cam_bin, _ = get_binning_from_header(frame.header)
         if cam_bin == 2:
             delta_thresh = 1.0
         else:
@@ -869,26 +895,8 @@ def update_master_catalog(catalog, wcs_list, cat_file, ref_image):
     with fits.open(ref_image) as hdul:
         header = hdul[0].header
 
-        if 'CAM-BIN' in header:
-            try:
-                cam_bin = int(header['CAM-BIN'])
-                bin_x = bin_y = cam_bin
-                print(f"Binning detected: {bin_x}x{bin_y}")
-            except ValueError:
-                raise ValueError(f"CAM-BIN value '{header['CAM-BIN']}' could not be parsed as an integer.")
-
-        elif 'HBIN_SZ' in header and 'VBIN_SZ' in header:
-            try:
-                bin_x = int(header['HBIN_SZ'])
-                bin_y = int(header['VBIN_SZ'])
-                print(f"Binning detected: {bin_x}x{bin_y}")
-            except ValueError:
-                raise ValueError(
-                    f"HBIN_SZ='{header['HBIN_SZ']}' or VBIN_SZ='{header['VBIN_SZ']}' could not be parsed as integers."
-                )
-
-        else:
-            raise ValueError("No valid binning keywords ('CAM-BIN' or 'HBIN_SZ'/'VBIN_SZ') found in the header.")
+        bin_x, bin_y = get_binning_from_header(header)
+        print(f"Binning detected: {bin_x}x{bin_y}")
 
     # Adjust image dimensions based on binning
     IMAGE_WIDTH = FULL_WIDTH // bin_x
