@@ -80,6 +80,21 @@ def filter_filenames(directory):
     return filter_science_filenames(directory, extra_excluded=("catalog_input",))
 
 
+def catalog_column(catalog, *names):
+    """
+    Return the first matching catalog column from a list of accepted names.
+    """
+    available = {name.lower(): name for name in catalog.columns.names}
+    for name in names:
+        match = available.get(name.lower())
+        if match is not None:
+            return catalog[match]
+    raise KeyError(
+        f"None of the expected catalog columns {names} exist. "
+        f"Available columns: {catalog.columns.names}"
+    )
+
+
 def arg_parse():
     parser = argparse.ArgumentParser(description="Run calibrated WCS photometry")
     parser.add_argument("--camera", type=str, default="QHY600")
@@ -143,8 +158,8 @@ def main():
             # calculate background rms
             bg_rms = frame_bg.rms()
             frame_data_corr_no_bg = frame_data - frame_bg
-            estimate_coord = SkyCoord(ra=frame_hdr['TELRA'],
-                                      dec=frame_hdr['TELDEC'],
+            estimate_coord = SkyCoord(ra=frame_hdr['MNTRA'],
+                                      dec=frame_hdr['MNTDEC'],
                                       unit=(u.deg, u.deg))
             estimate_coord_radius = 3 * u.deg
 
@@ -157,8 +172,14 @@ def main():
             # Load the photometry catalog
             phot_cat, _ = get_catalog(f"{directory}/{prefix}_catalog_input.fits", ext=1)
             logging.info(f"Found catalog with name {prefix}_catalog_input.fits")
+            phot_ra = catalog_column(phot_cat, "ra_deg_corr", "RA_CORR")
+            phot_dec = catalog_column(phot_cat, "dec_deg_corr", "DEC_CORR")
+            phot_tic = catalog_column(phot_cat, "tic_id", "TIC")
+            phot_bp = catalog_column(phot_cat, "gaiabp", "BPmag")
+            phot_rp = catalog_column(phot_cat, "gaiarp", "RPmag")
+
             # Convert RA and DEC to pixel coordinates using the WCS information from the header
-            phot_x, phot_y = WCS(frame_hdr).all_world2pix(phot_cat['ra_deg_corr'], phot_cat['dec_deg_corr'], 1)
+            phot_x, phot_y = WCS(frame_hdr).all_world2pix(phot_ra, phot_dec, 1)
 
             # Do time conversions - one time value per format per target
             half_exptime = frame_hdr['EXPTIME'] / 2.
@@ -167,8 +188,8 @@ def main():
             time_jd = Time(time_isot.jd, format='jd', scale='utc', location=get_location())
             # Correct to mid-exposure time
             time_jd = time_jd + half_exptime * u.second
-            ra = phot_cat['ra_deg_corr']
-            dec = phot_cat['dec_deg_corr']
+            ra = phot_ra
+            dec = phot_dec
             ltt_bary, ltt_helio = get_light_travel_times(ra, dec, time_jd)
             time_bary = time_jd.tdb + ltt_bary
             time_helio = time_jd.utc + ltt_helio
@@ -176,8 +197,8 @@ def main():
             frame_ids = [filename for i in range(len(phot_x))]
             logging.info(f"Found {len(frame_ids)} sources")
 
-            frame_preamble = Table([frame_ids, phot_cat['Tmag'], phot_cat['tic_id'],
-                                    phot_cat['gaiabp'], phot_cat['gaiarp'], time_jd.value, time_bary.value,
+            frame_preamble = Table([frame_ids, phot_cat['Tmag'], phot_tic,
+                                    phot_bp, phot_rp, time_jd.value, time_bary.value,
                                     phot_x, phot_y,
                                     [airmass] * len(phot_x), [zp] * len(phot_x)],
                                    names=("frame_id", "Tmag", "tic_id", "gaiabp", "gaiarp", "jd_mid",
