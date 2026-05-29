@@ -1,13 +1,14 @@
 #! /usr/bin/env python
+import argparse
 import os
-from datetime import datetime, timedelta
 
 import numpy as np
 
 from calibration_images_W1m import reduce_images
-from utils_W1m import (get_location, wcs_phot, _detect_objects_sep, get_catalog,
+from utils_W1m import (filter_science_filenames, get_location,
+                       group_filenames_by_object_prefix,
+                       wcs_phot, _detect_objects_sep, get_catalog,
                        extract_airmass_and_zp, get_light_travel_times)
-import json
 import warnings
 import logging
 from astropy.io import fits
@@ -23,9 +24,11 @@ from astropy.utils.exceptions import AstropyWarning
 # Set up logging
 logger = logging.getLogger()  # Get the root logger
 logger.setLevel(logging.INFO)  # Set the overall logging level
+log_dir = os.environ.get("PIPELINE_LOG_DIR", os.path.join(os.getcwd(), "logs"))
+os.makedirs(log_dir, exist_ok=True)
 
 # Create file handler
-file_handler = logging.FileHandler('process.log')
+file_handler = logging.FileHandler(os.path.join(log_dir, 'process.log'))
 file_handler.setLevel(logging.INFO)  # Set the level for the file handler
 
 # Create stream handler (for terminal output)
@@ -60,24 +63,6 @@ ZP_CLIP_SIGMA = 3
 OK, TOO_FEW_OBJECTS, UNKNOWN = range(3)
 
 
-def load_config(filename):
-    with open(filename, 'r') as file:
-        config = json.load(file)
-    return config
-
-
-# Load paths from the configuration file
-config = load_config('directories.json')
-calibration_paths = config["calibration_paths"]
-base_paths = config["base_paths"]
-out_paths = config["out_paths"]
-
-# Select directory based on existence
-for calibration_path, base_path, out_path in zip(calibration_paths, base_paths, out_paths):
-    if os.path.exists(base_path):
-        break
-
-
 def filter_filenames(directory):
     """
     Filter filenames based on specific criteria.
@@ -92,41 +77,18 @@ def filter_filenames(directory):
     list of str
         Filtered list of filenames.
     """
-    filtered_filenames = []
-    for filename in os.listdir(directory):
-        if filename.endswith('.fits'):
-            exclude_words = ["evening", "morning", "flat", "bias", "dark", "catalog", "phot", "catalog_input"]
-            if any(word in filename.lower() for word in exclude_words):
-                continue
-            filtered_filenames.append(filename)  # Append only the filename without the directory path
-    return sorted(filtered_filenames)
+    return filter_science_filenames(directory, extra_excluded=("catalog_input",))
 
 
-def get_prefix(filenames):
-    """
-    Extract unique prefixes from a list of filenames.
-
-    Parameters
-    ----------
-    filenames : list of str
-        List of filenames.
-
-    Returns
-    -------
-    set of str
-        Set of unique prefixes extracted from the filenames.
-    """
-    prefixes = set()
-    for filename in filenames:
-        with fits.open(filename) as hdulist:
-            object_keyword = hdulist[0].header.get('OBJECT', '')
-            prefix = object_keyword[:11]  # Take first 11 letters
-            if prefix:  # Check if prefix is not empty
-                prefixes.add(prefix)
-    return prefixes
+def arg_parse():
+    parser = argparse.ArgumentParser(description="Run calibrated WCS photometry")
+    parser.add_argument("--camera", type=str, default="QHY600")
+    return parser.parse_args()
 
 
 def main():
+    args = arg_parse()
+
     # set directory for the current working directory
     directory = os.getcwd()
     logging.info(f"Directory: {directory}")
@@ -136,7 +98,8 @@ def main():
     logging.info(f"Number of files: {len(filenames)}")
 
     # Get prefixes for each set of images
-    prefixes = get_prefix(filenames)
+    filenames_by_prefix = group_filenames_by_object_prefix(filenames, args.camera)
+    prefixes = filenames_by_prefix.keys()
     logging.info(f"The prefixes are: {prefixes}")
 
     for prefix in prefixes:
@@ -151,12 +114,12 @@ def main():
         phot_table = None
 
         # Iterate over filenames with the current prefix
-        prefix_filenames = [filename for filename in filenames if filename.startswith(prefix)]
+        prefix_filenames = filenames_by_prefix[prefix]
         for filename in prefix_filenames:
             logging.info(f"Processing filename {filename}......")
             # Calibrate image and get FITS file
             logging.info(f"The average pixel value for {filename} is {fits.getdata(os.path.join(directory, filename)).mean()}")
-            reduced_data, reduced_header, _ = reduce_images(base_path, out_path, [filename])
+            reduced_data, reduced_header, _ = reduce_images([filename])
             logging.info(f"The average pixel value for {filename} is {reduced_data[0].mean()}")
             # Convert reduced_data to a dictionary with filenames as keys
             reduced_data_dict = {filename: (data, header) for data, header in zip(reduced_data, reduced_header)}

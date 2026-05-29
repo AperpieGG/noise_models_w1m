@@ -4,15 +4,17 @@ Run through many reference images, generate catalogs
 and try solving them one by one
 """
 import os
-import glob as g
 import argparse as ap
+import subprocess
+from pathlib import Path
 from astropy.io import fits
-
-# Possible base paths
-path = "/Users/u5500483/Documents/GitHub/W1m_stuff/"
-
-# Pick the one that exists
-solve_script = path
+from utils_W1m import (
+    camera_config,
+    filter_science_filenames,
+    is_astrometrically_solved,
+    object_prefix,
+    pointing_from_header,
+)
 
 
 def arg_parse():
@@ -36,36 +38,51 @@ def arg_parse():
                    help='camera type (ccd, cmos or IMX571)',
                    type=str,
                    default='IMX571')
+    p.add_argument('--script-dir',
+                   help='Directory containing the pipeline Python scripts',
+                   type=Path,
+                   default=Path(__file__).resolve().parent)
     return p.parse_args()
+
+
+def run_solver(script_dir, cat_file, fits_file, scale_min, scale_max, args):
+    """
+    Run solve_ref_images_W1m.py for one FITS file.
+    """
+    cmd = [
+        "python",
+        str(script_dir / "solve_ref_images_W1m.py"),
+        cat_file,
+        fits_file,
+        "--scale_min",
+        str(scale_min),
+        "--scale_max",
+        str(scale_max),
+    ]
+    if args.save_matched_cat:
+        cmd.append("--save_matched_cat")
+    if args.defocus is not None:
+        cmd.extend(["--defocus", f"{args.defocus:.2f}"])
+    if args.force3rd:
+        cmd.append("--force3rd")
+    return subprocess.run(cmd, check=False).returncode
 
 
 if __name__ == "__main__":
     # Grab command line args
     args = arg_parse()
+    config = camera_config(args.camera)
+    script_dir = args.script_dir.resolve()
 
     # Set scale values based on camera type
     print(f'Using camera type: {args.camera}')
-    if args.camera.lower() == 'ccd':
-        scale_min = "4.5"
-        scale_max = "5.5"
-    elif args.camera.lower() == 'cmos':
-        scale_min = "3.5"
-        scale_max = "4.5"
-    elif args.camera == 'IMX571':
-        scale_min = "0.1"
-        scale_max = "0.5"
-    # TODO: find the correct scale min scale max for QHY600 in W1m
-    elif args.camera == 'QHY600':
-        scale_min = "0.1"
-        scale_max = "0.5"
+    scale_min = config["scale_min"]
+    scale_max = config["scale_max"]
 
     # Get a list of all FITS images, exclude whatever has catalog name in
-    all_fits = sorted(g.glob("*.fits"))
+    all_fits = sorted([f for f in os.listdir(".") if f.endswith(".fits")])
     print(f"Found {len(all_fits)} FITS files.")
-    all_fits = [f for f in all_fits if "_cat" not in f]
-    # exclude words in the fits file
-    excluded_list = ["bias", "dark", "flat", "morning", "evening", "catalog", "phot"]
-    all_fits = [f for f in all_fits if not any(word in f.lower() for word in excluded_list)]
+    all_fits = filter_science_filenames(".")
     print(f"Found {len(all_fits)} FITS files after excluding not suitable files.")
 
     if not all_fits:
@@ -74,68 +91,36 @@ if __name__ == "__main__":
 
     # Select the first image as the reference
     ref_image = all_fits[0]
-    base_name = ref_image.split('.fits')[0]
     with fits.open(ref_image) as ff:
-        object_keyword = ff[0].header.get('OBJECT', '')
-        if args.camera.lower() == 'cmos':
-            prefix = object_keyword[:11]  # First 11 characters
-        else:  # Assume CCD by default
-            prefix = object_keyword  # Use the entire keyword
+        prefix = object_prefix(ff[0].header, args.camera)
 
     print(f"Using reference image: {ref_image} with prefix: {prefix}")
     cat_file = f"{prefix}_catalog.fits"
 
     # Get coordinates from the reference image header
-    if args.camera.lower() == 'ccd':
-        with fits.open(ref_image) as ff:
-            ra = str(ff[0].header['CMD_RA'])
-            dec = str(ff[0].header['CMD_DEC'])
-            epoch = str(ff[0].header['DATE-OBS'])
-            box_size = "3"  # Adjustable
-    elif args.camera.lower() == 'cmos':
-        with fits.open(ref_image) as ff:
-            ra = str(ff[0].header['TELRAD'])
-            dec = str(ff[0].header['TELDECD'])
-            epoch = str(ff[0].header['DATE-OBS'])
-            box_size = "3"  # Adjustable
-    elif args.camera == 'IMX571':
-        with fits.open(ref_image) as ff:
-            ra = str(ff[0].header['MNTRAD'])
-            dec = str(ff[0].header['MNTDECD'])
-            epoch = str(ff[0].header['DATE-OBS'])
-            box_size = "1"
-    # TODO: find the correct header keywords for QHY600 in W1m
-    elif args.camera == 'QHY600':
-        with fits.open(ref_image) as ff:
-            ra = str(ff[0].header['MNTRAD'])
-            dec = str(ff[0].header['MNTDECD'])
-            epoch = str(ff[0].header['DATE-OBS'])
-            box_size = "1"
+    with fits.open(ref_image) as ff:
+        ra, dec, epoch, box_size = pointing_from_header(ff[0].header, args.camera)
 
     # Create the catalog if it doesn't exist
     if not os.path.exists(cat_file):
         print(f'Did not find catalog file: {cat_file}')
-        cmd_args = [solve_script + "make_ref_catalog_W1m.py",
-                    ra, dec, box_size, box_size, epoch, cat_file]
-        cmd = " ".join(cmd_args)
-        os.system(cmd)
+        cmd_args = [
+            "python",
+            str(script_dir / "make_ref_catalog_W1m.py"),
+            ra,
+            dec,
+            box_size,
+            box_size,
+            epoch,
+            cat_file,
+        ]
+        subprocess.run(cmd_args, check=True)
         print("Catalog created for image {} with prefix: {}\n".format(ref_image, prefix))
 
     # Solve reference image with catalog file
     if os.path.exists(cat_file):
         print(f'Solving reference image: {ref_image}')
-        cmd2_args = [solve_script + "solve_ref_images_W1m.py",
-                     cat_file, ref_image, "--scale_min", scale_min, "--scale_max", scale_max]
-
-        if args.save_matched_cat:
-            cmd2_args.append("--save_matched_cat")
-        if args.defocus is not None:
-            cmd2_args.append(f"--defocus {args.defocus:.2f}")
-        if args.force3rd:
-            cmd2_args.append("--force3rd")
-
-        cmd2 = " ".join(cmd2_args)
-        result = os.system(cmd2)
+        result = run_solver(script_dir, cat_file, ref_image, scale_min, scale_max, args)
 
         if result != 0:  # Exit if the reference image fails to solve
             print(f"Failed to solve the reference image {ref_image}. Exiting the script.")
@@ -149,32 +134,16 @@ if __name__ == "__main__":
                 continue
 
             with fits.open(fits_file) as hdulist:
-                object_keyword = hdulist[0].header.get('OBJECT', '')
-                if args.camera.lower() == 'cmos':
-                    current_prefix = object_keyword[:11]
-                else:
-                    current_prefix = object_keyword
+                current_prefix = object_prefix(hdulist[0].header, args.camera)
 
                 if current_prefix.startswith(prefix):
                     if "_cat" not in fits_file and fits_file != ref_image:
-                        if 'CTYPE1' in hdulist[0].header and 'CTYPE2' in hdulist[0].header and 'ZP_ORDER' in hdulist[
-                            0].header:
+                        if is_astrometrically_solved(hdulist[0].header):
                             print(f"Image {fits_file} is already solved. Skipping..\n")
                             continue
 
                         print(f"Solving image {fits_file} for prefix: {prefix}\n")
-                        cmd2_args = [solve_script + "solve_ref_images_W1m.py",
-                                     cat_file, fits_file, "--scale_min", scale_min, "--scale_max", scale_max]
-
-                        if args.save_matched_cat:
-                            cmd2_args.append("--save_matched_cat")
-                        if args.defocus is not None:
-                            cmd2_args.append(f"--defocus {args.defocus:.2f}")
-                        if args.force3rd:
-                            cmd2_args.append("--force3rd")
-
-                        cmd2 = " ".join(cmd2_args)
-                        result = os.system(cmd2)
+                        result = run_solver(script_dir, cat_file, fits_file, scale_min, scale_max, args)
 
                         if result != 0:
                             print(f"Failed to solve the image {fits_file}. Skipping to the next image.\n")

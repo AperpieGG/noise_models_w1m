@@ -14,7 +14,7 @@ import os
 import numpy as np
 from astropy.time import Time
 import astropy.units as u
-from utils_W1m import get_location, get_light_travel_times
+from utils_W1m import filter_science_filenames, get_location, get_light_travel_times
 
 
 def filter_filenames(directory):
@@ -31,14 +31,7 @@ def filter_filenames(directory):
     list of str
         Filtered list of filenames.
     """
-    filtered_filenames = []
-    for filename in os.listdir(directory):
-        if filename.endswith('.fits'):
-            exclude_words = ["evening", "morning", "flat", "bias", "dark", "catalog", "phot"]
-            if any(word in filename.lower() for word in exclude_words):
-                continue
-            filtered_filenames.append(filename)  # Append only the filename without the directory path
-    return sorted(filtered_filenames)
+    return filter_science_filenames(directory)
 
 
 def update_header(directory):
@@ -120,4 +113,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

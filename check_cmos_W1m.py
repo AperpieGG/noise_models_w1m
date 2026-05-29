@@ -9,18 +9,27 @@ python check_headers.py
 """
 
 from donuts import Donuts
+import argparse
 from astropy.io import fits
 import numpy as np
 import os
+import shutil
 import logging
 import warnings
+from utils_W1m import (
+    filter_science_filenames,
+    group_filenames_by_object_prefix,
+    is_astrometrically_solved,
+)
 
 # Set up logging
 logger = logging.getLogger()  # Get the root logger
 logger.setLevel(logging.INFO)  # Set the overall logging level
+log_dir = os.environ.get("PIPELINE_LOG_DIR", os.path.join(os.getcwd(), "logs"))
+os.makedirs(log_dir, exist_ok=True)
 
 # Create file handler
-file_handler = logging.FileHandler('donuts.log')
+file_handler = logging.FileHandler(os.path.join(log_dir, 'donuts.log'))
 file_handler.setLevel(logging.INFO)  # Set the level for the file handler
 
 # Create stream handler (for terminal output)
@@ -54,35 +63,7 @@ def filter_filenames(directory):
     list of str
         Filtered list of filenames.
     """
-    filtered_filenames = []
-    for filename in os.listdir(directory):
-        if filename.endswith('.fits'):
-            exclude_words = ["evening", "morning", "flat", "bias", "dark", "catalog", "phot"]
-            if any(word in filename.lower() for word in exclude_words):
-                continue
-            filtered_filenames.append(filename)  # Append only the filename without the directory path
-    return sorted(filtered_filenames)
-
-
-def get_prefix(filenames):
-    """
-    Extract unique prefixes from a list of filenames.
-
-    Parameters
-    ----------
-    filenames : list of str
-        List of filenames.
-
-    Returns
-    -------
-    set of str
-        Set of unique prefixes extracted from the filenames.
-    """
-    prefixes = set()
-    for filename in filenames:
-        prefix = filename[:11]
-        prefixes.add(prefix)
-    return prefixes
+    return filter_science_filenames(directory)
 
 
 def check_headers(directory, filenames):
@@ -103,14 +84,11 @@ def check_headers(directory, filenames):
         try:
             with fits.open(os.path.join(directory, file)) as hdulist:
                 header = hdulist[0].header
-                ctype1 = header.get('CTYPE1')
-                ctype2 = header.get('CTYPE2')
-
-                if ctype1 is None or ctype2 is None:
+                if not is_astrometrically_solved(header, require_zp=False):
                     logger.warning(f"{file} does not have CTYPE1 and/or CTYPE2 in the header. "
                                    f"Moving to 'no_wcs' directory.")
                     new_path = os.path.join(no_wcs, file)
-                    os.rename(os.path.join(directory, file), new_path)
+                    shutil.move(os.path.join(directory, file), new_path)
 
         except Exception as e:
             logger.error(f"Error checking header for {file}: {e}")
@@ -130,7 +108,10 @@ def check_donuts(file_groups, filenames):
         List of filenames.
     """
     # Assuming Donuts class and measure_shift function are defined elsewhere
-    for filename, file_group in zip(filenames, file_groups):
+    for file_group in file_groups:
+        if len(file_group) < 2:
+            continue
+
         # Using the first filename as the reference image
         all_sx = []
         all_sy = []
@@ -146,7 +127,6 @@ def check_donuts(file_groups, filenames):
             sx = round(shift.x.value, 2)
             sy = round(shift.y.value, 2)
             logger.info(f'{i} shift X: {sx} Y: {sy}')
-            shifts = np.array([abs(sx), abs(sy)])
 
             all_sx.append(sx)
             all_sy.append(sy)
@@ -155,20 +135,28 @@ def check_donuts(file_groups, filenames):
                 logger.warning(f'{i} image shift too big X: {sx} Y: {sy}')
                 if not os.path.exists('failed_donuts'):
                     os.mkdir('failed_donuts')
-                comm = f'mv {i} failed_donuts/'
-                logger.info(comm)
-                os.system(comm)
-    # Compute scatter (std) after all shifts
-    if all_sx and all_sy:
-        std_x = np.std(all_sx)
-        std_y = np.std(all_sy)
-        logger.info(f"Scatter of X shifts (std): {std_x:.3f} pixels")
-        logger.info(f"Scatter of Y shifts (std): {std_y:.3f} pixels")
-    else:
-        logger.info("No shifts measured; scatter cannot be computed.")
+                logger.info(f'Moving {i} to failed_donuts/')
+                shutil.move(i, os.path.join('failed_donuts', os.path.basename(i)))
+
+        # Compute scatter (std) after all shifts
+        if all_sx and all_sy:
+            std_x = np.std(all_sx)
+            std_y = np.std(all_sy)
+            logger.info(f"Scatter of X shifts (std): {std_x:.3f} pixels")
+            logger.info(f"Scatter of Y shifts (std): {std_y:.3f} pixels")
+        else:
+            logger.info("No shifts measured; scatter cannot be computed.")
+
+
+def arg_parse():
+    parser = argparse.ArgumentParser(description="Check WCS headers and Donuts image shifts")
+    parser.add_argument("--camera", type=str, default="QHY600")
+    return parser.parse_args()
 
 
 def main():
+    args = arg_parse()
+
     # set directory for working
     directory = os.getcwd()
     logger.info(f"Directory: {directory}")
@@ -178,11 +166,12 @@ def main():
     logger.info(f"Number of files: {len(filenames)}")
 
     # Iterate over each filename to get the prefix
-    prefixes = get_prefix(filenames)
+    prefix_groups = group_filenames_by_object_prefix(filenames, args.camera)
+    prefixes = set(prefix_groups)
     logger.info(f"The prefixes are: {prefixes}")
 
     # Get filenames corresponding to each prefix
-    prefix_filenames = [[filename for filename in filenames if filename.startswith(prefix)] for prefix in prefixes]
+    prefix_filenames = list(prefix_groups.values())
 
     # Check headers for CTYPE1 and CTYPE2
     check_headers(directory, filenames)

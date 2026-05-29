@@ -13,6 +13,9 @@ from astropy.coordinates import SkyCoord, EarthLocation
 from astropy.wcs import WCS
 import astropy.units as u
 from astropy.table import Table, hstack
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig")
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 import matplotlib.pyplot as plt
 from scipy.stats import median_abs_deviation
 from astropy.time import Time
@@ -20,6 +23,122 @@ from astropy.time import Time
 # pylint: disable=invalid-name
 # pylint: disable=no-member
 # pylint: disable=c-extension-no-member
+
+EXCLUDED_SCIENCE_WORDS = (
+    "bias", "dark", "flat", "morning", "evening", "catalog", "phot"
+)
+
+CAMERA_CONFIG = {
+    "ccd": {
+        "scale_min": 4.5,
+        "scale_max": 5.5,
+        "ra_key": "CMD_RA",
+        "dec_key": "CMD_DEC",
+        "box_size": 3,
+        "prefix_chars": None,
+    },
+    "cmos": {
+        "scale_min": 3.5,
+        "scale_max": 4.5,
+        "ra_key": "TELRAD",
+        "dec_key": "TELDECD",
+        "box_size": 3,
+        "prefix_chars": 11,
+    },
+    "imx571": {
+        "scale_min": 0.1,
+        "scale_max": 0.5,
+        "ra_key": "MNTRAD",
+        "dec_key": "MNTDECD",
+        "box_size": 1,
+        "prefix_chars": None,
+    },
+    "qhy600": {
+        "scale_min": 0.1,
+        "scale_max": 0.5,
+        "ra_key": "MNTRAD",
+        "dec_key": "MNTDECD",
+        "box_size": 1,
+        "prefix_chars": None,
+    },
+}
+
+
+def normalise_camera(camera):
+    """
+    Return a canonical camera name used by the pipeline configuration.
+    """
+    camera_key = camera.lower()
+    if camera_key not in CAMERA_CONFIG:
+        raise ValueError(f"Unsupported camera type: {camera}")
+    return camera_key
+
+
+def camera_config(camera):
+    """
+    Return plate-scale and header keyword settings for a camera.
+    """
+    return CAMERA_CONFIG[normalise_camera(camera)]
+
+
+def filter_science_filenames(directory=".", extra_excluded=()):
+    """
+    Return science FITS filenames in a directory using the pipeline exclusions.
+    """
+    excluded_words = EXCLUDED_SCIENCE_WORDS + tuple(extra_excluded)
+    filenames = []
+    for filename in os.listdir(directory):
+        if not filename.endswith(".fits"):
+            continue
+        if any(word in filename.lower() for word in excluded_words):
+            continue
+        filenames.append(filename)
+    return sorted(filenames)
+
+
+def object_prefix(header, camera):
+    """
+    Return the object prefix for grouping images from a FITS header.
+    """
+    prefix = header.get("OBJECT", "")
+    prefix_chars = camera_config(camera)["prefix_chars"]
+    if prefix_chars is not None:
+        return prefix[:prefix_chars]
+    return prefix
+
+
+def group_filenames_by_object_prefix(filenames, camera):
+    """
+    Group FITS filenames by the configured OBJECT header prefix.
+    """
+    grouped = {}
+    for filename in filenames:
+        with fits.open(filename) as hdulist:
+            prefix = object_prefix(hdulist[0].header, camera)
+        if prefix:
+            grouped.setdefault(prefix, []).append(filename)
+    return grouped
+
+
+def pointing_from_header(header, camera):
+    """
+    Return RA, Dec, epoch, and catalog box size for the camera/header pair.
+    """
+    config = camera_config(camera)
+    return (
+        str(header[config["ra_key"]]),
+        str(header[config["dec_key"]]),
+        str(header["DATE-OBS"]),
+        str(config["box_size"]),
+    )
+
+
+def is_astrometrically_solved(header, require_zp=True):
+    """
+    Check whether a FITS header has the expected astrometric solution cards.
+    """
+    keys = ("CTYPE1", "CTYPE2", "ZP_ORDER") if require_zp else ("CTYPE1", "CTYPE2")
+    return all(key in header for key in keys)
 
 
 def plot_images():

@@ -1,0 +1,44 @@
+Starting processing for camera: IMX571
+Pipeline log: /Users/u5500483/Documents/GitHub/noise_models_w1m/logs/pipeline_IMX571_20260529T165348Z.log
+Using camera type: IMX571
+Found 4 FITS files.
+Found 3 FITS files after excluding not suitable files.
+Using reference image: KELT-16-20250820000606758.fits with prefix: KELT-16
+Solving reference image: KELT-16-20250820000606758.fits
+Reading input file 1 of 1: "/var/folders/ry/y1q_cv813fg1f97kxq89yc100000gq/T/tmp95v37lzw/scratch.xyls"...
+Solving...
+Reading file "/var/folders/ry/y1q_cv813fg1f97kxq89yc100000gq/T/tmp95v37lzw/scratch.axy"...
+Only searching for solutions within 4 degrees of RA,Dec (314.29,31.5373)
+Field 1 did not solve (index index-4205-03.fits, field objects 1-10).
+Field 1 did not solve (index index-4110.fits, field objects 1-10).
+Field 1 did not solve (index index-4205-03.fits, field objects 11-20).
+Field 1 did not solve (index index-4110.fits, field objects 11-20).
+  log-odds ratio 129.485 (1.71701e+56), 18 match, 1 conflict, 36 distractors, 26 index.
+  RA,Dec = (314.268,31.6611), pixel scale 0.226327 arcsec/pix.
+  Hit/miss:   Hit/miss: ++++-++--++-+-++-------+----c--+----+++-+-------------+(best)---------------------------------------------
+Field 1: solved with index index-4205-03.fits.
+Field 1 solved: writing to file /var/folders/ry/y1q_cv813fg1f97kxq89yc100000gq/T/tmp95v37lzw/scratch.solved to indicate this.
+Field: /var/folders/ry/y1q_cv813fg1f97kxq89yc100000gq/T/tmp95v37lzw/scratch.xyls
+Field center: (RA,Dec) = (314.267820, 31.661087) deg.
+Field center: (RA H:M:S, Dec D:M:S) = (20:57:04.277, +31:39:39.912).
+Field size: 23.5831 x 15.7523 arcminutes
+Field rotation angle: up is 89.791 degrees E of N
+Field parity: neg
+
+Source detect using default kernel
+14.035945415496826 1250 1177
+./KELT-16-20250820000606758.fits failed WCS, skipping...
+
+Traceback (most recent call last):
+  File "/Users/u5500483/Documents/GitHub/noise_models_w1m/solve_ref_images_W1m.py", line 658, in prepare_frame
+    cam_bin = frame.header['HBIN_SZ']
+              ~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/u5500483/.local/lib/python3.11/site-packages/astropy-6.0.0-py3.11-macosx-11.1-arm64.egg/astropy/io/fits/header.py", line 170, in __getitem__
+    card = self._cards[self._cardindex(key)]
+                       ^^^^^^^^^^^^^^^^^^^^
+  File "/Users/u5500483/.local/lib/python3.11/site-packages/astropy-6.0.0-py3.11-macosx-11.1-arm64.egg/astropy/io/fits/header.py", line 1726, in _cardindex
+    raise KeyError(f"Keyword {keyword!r} not found.")
+KeyError: "Keyword 'HBIN_SZ' not found."
+No solved reference images
+Failed to solve the reference image KELT-16-20250820000606758.fits. Exiting the script.
+Pipeline failed at line 22 with exit code 1

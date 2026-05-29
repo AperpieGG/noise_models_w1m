@@ -16,6 +16,9 @@ import argparse as ap
 import sep
 import numpy as np
 import pymysql
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig")
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 import matplotlib
 import astropy.units as u
 from astropy.io import fits
