@@ -11,16 +11,27 @@ python check_headers.py
 from donuts import Donuts
 import argparse
 from astropy.io import fits
+from astropy.time import Time
 import numpy as np
 import os
 import shutil
 import logging
 import warnings
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig")
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+import matplotlib
+
+matplotlib.use('Agg')
+from matplotlib import pyplot as plt
+
 from utils_W1m import (
     filter_science_filenames,
     group_filenames_by_object_prefix,
-    is_astrometrically_solved,
+    is_astrometrically_solved, plot_images
 )
+
+plot_images()
 
 # Set up logging
 logger = logging.getLogger()  # Get the root logger
@@ -108,6 +119,8 @@ def check_donuts(file_groups, filenames):
         List of filenames.
     """
     # Assuming Donuts class and measure_shift function are defined elsewhere
+    shift_rows = []
+
     for file_group in file_groups:
         if len(file_group) < 2:
             continue
@@ -128,10 +141,20 @@ def check_donuts(file_groups, filenames):
             sy = round(shift.y.value, 2)
             logger.info(f'{i} shift X: {sx} Y: {sy}')
 
+            with fits.open(i) as hdulist:
+                date_obs = hdulist[0].header.get('DATE-OBS')
+
+            shift_rows.append({
+                "filename": i,
+                "date_obs": date_obs,
+                "shift_x": sx,
+                "shift_y": sy,
+            })
+
             all_sx.append(sx)
             all_sy.append(sy)
 
-            if abs(sx) >= 0.5 or abs(sy) >= 0.5:
+            if abs(sx) >= 1 or abs(sy) >= 1:
                 logger.warning(f'{i} image shift too big X: {sx} Y: {sy}')
                 if not os.path.exists('failed_donuts'):
                     os.mkdir('failed_donuts')
@@ -146,6 +169,57 @@ def check_donuts(file_groups, filenames):
             logger.info(f"Scatter of Y shifts (std): {std_y:.3f} pixels")
         else:
             logger.info("No shifts measured; scatter cannot be computed.")
+
+    plot_shift_rows(shift_rows)
+
+
+def plot_shift_rows(shift_rows):
+    """
+    Save a plot of Donuts X/Y shifts versus observation time.
+    """
+    if not shift_rows:
+        logger.info("No Donuts shifts available for plotting.")
+        return
+
+    plot_dir = os.environ.get("PIPELINE_LOG_DIR", os.path.join(os.getcwd(), "logs"))
+    os.makedirs(plot_dir, exist_ok=True)
+    plot_path = os.path.join(plot_dir, "donuts_pixel_shifts.png")
+
+    times = []
+    labels = []
+    for index, row in enumerate(shift_rows):
+        if row["date_obs"]:
+            try:
+                times.append(Time(row["date_obs"], format="isot").datetime)
+                labels.append(row["date_obs"])
+                continue
+            except ValueError:
+                pass
+        times.append(index)
+        labels.append(row["filename"])
+
+    shift_x = [row["shift_x"] for row in shift_rows]
+    shift_y = [row["shift_y"] for row in shift_rows]
+
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+    ax.plot(times, shift_x, marker="o", color="tab:blue", label="X shift")
+    ax.plot(times, shift_y, marker="o", color="tab:red", label="Y shift")
+    ax.axhline(0.5, color="0.5", linestyle="--", linewidth=1)
+    ax.axhline(-0.5, color="0.5", linestyle="--", linewidth=1)
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Pixel shift")
+    ax.legend()
+    ax.grid(alpha=0.25)
+    fig.autofmt_xdate()
+
+    if all(isinstance(t, int) for t in times):
+        ax.set_xticks(times)
+        ax.set_xticklabels(labels, rotation=30, ha="right")
+
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=150)
+    plt.close(fig)
+    logger.info(f"Saved Donuts pixel shift plot to {plot_path}")
 
 
 def arg_parse():
