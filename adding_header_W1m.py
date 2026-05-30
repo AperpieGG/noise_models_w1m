@@ -34,7 +34,7 @@ def filter_filenames(directory):
     return filter_science_filenames(directory)
 
 
-def update_header(directory):
+def update_header(directory, camera=None):
     """
     Update the header of FITS files in the specified directory.
 
@@ -43,6 +43,8 @@ def update_header(directory):
     directory : str
         Path to the directory containing FITS files.
     """
+
+    site_location = get_location(camera)
 
     for filename in filter_filenames(directory):
         filename = os.path.join(directory, filename)
@@ -60,8 +62,8 @@ def update_header(directory):
                 # Additional calculations based on header information
                 data_exp = round(float(hdul[0].header['EXPTIME']), 2)
                 half_exptime = data_exp / 2.
-                time_isot = Time(hdul[0].header['DATE-OBS'], format='isot', scale='utc', location=get_location())
-                time_jd = Time(time_isot.jd, format='jd', scale='utc', location=get_location())
+                time_isot = Time(hdul[0].header['DATE-OBS'], format='isot', scale='utc', location=site_location)
+                time_jd = Time(time_isot.jd, format='jd', scale='utc', location=site_location)
                 time_jd += half_exptime * u.second
                 try:
                     # Check for 'TELRAD' and 'TELDECD' in the header
@@ -100,6 +102,8 @@ def main():
 
     parser = argparse.ArgumentParser(description='Add headers to FITS files')
     parser.add_argument('--directory', type=str, help='Path to the directory containing FITS files')
+    parser.add_argument('--camera', type=str, default=None,
+                        help='Camera config name/path used for observatory location')
     args = parser.parse_args()
 
     if args.directory:
@@ -107,7 +111,7 @@ def main():
     else:
         custom_directory = os.getcwd()  # Use the current working directory if no custom directory is provided
 
-    update_header(custom_directory)
+    update_header(custom_directory, args.camera)
     print(f"Using directory: {custom_directory}")
 
 
