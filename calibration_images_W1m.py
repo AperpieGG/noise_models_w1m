@@ -82,10 +82,49 @@ def flat(master_bias, master_dark, dark_exposure=10):
         return master_flat
 
 
-def reduce_images(prefix_filenames):
+def load_calibration_masters():
     master_bias = bias()
     master_dark = dark(master_bias)
     master_flat = flat(master_bias, master_dark)
+    return master_bias, master_dark, master_flat
+
+
+def reduce_image(filename, master_bias=None, master_dark=None, master_flat=None, site_location=None):
+    fd, hdr = fits.getdata(filename, header=True)
+    fd = fd.astype(np.float64)
+    data_exp = round(float(hdr['EXPTIME']), 2)
+    half_exptime = data_exp / 2.
+    if site_location is None:
+        site_location = get_location()
+    time_isot = Time(hdr['DATE-OBS'], format='isot', scale='utc', location=site_location)
+    time_jd = Time(time_isot.jd, format='jd', scale='utc', location=site_location) + half_exptime * u.second
+    try:
+        ra = hdr['TELRAD']
+        dec = hdr['TELDECD']
+    except KeyError:
+        ra = hdr.get('MNTRAD', 0)
+        dec = hdr.get('MNTDECD', 0)
+    ltt_bary, ltt_helio = get_light_travel_times(ra, dec, time_jd)
+    time_bary = time_jd.tdb + ltt_bary
+    time_helio = time_jd.utc + ltt_helio
+
+    if master_bias is not None:
+        print(f'Subtracting master bias from {filename}')
+        fd -= master_bias
+        print(f'After bias subtraction, mean pixel value for {filename}: {np.mean(fd)}')
+    if master_dark is not None:
+        fd -= master_dark * hdr['EXPTIME'] / 10
+    if master_flat is not None:
+        print(f'Dividing by master flat from {filename}')
+        fd /= master_flat
+
+    return fd, hdr, os.path.basename(filename)
+
+
+def reduce_images(prefix_filenames, masters=None):
+    if masters is None:
+        masters = load_calibration_masters()
+    master_bias, master_dark, master_flat = masters
 
     reduced_data = []
     reduced_header_info = []
@@ -93,35 +132,10 @@ def reduce_images(prefix_filenames):
 
     for filename in prefix_filenames:
         try:
-            fd, hdr = fits.getdata(filename, header=True)
-            fd = fd.astype(np.float64)  # <-- Add this line
-            data_exp = round(float(hdr['EXPTIME']), 2)
-            half_exptime = data_exp / 2.
-            time_isot = Time(hdr['DATE-OBS'], format='isot', scale='utc', location=get_location())
-            time_jd = Time(time_isot.jd, format='jd', scale='utc', location=get_location()) + half_exptime * u.second
-            try:
-                ra = hdr['TELRAD']
-                dec = hdr['TELDECD']
-            except KeyError:
-                ra = hdr.get('MNTRAD', 0)
-                dec = hdr.get('MNTDECD', 0)
-            ltt_bary, ltt_helio = get_light_travel_times(ra, dec, time_jd)
-            time_bary = time_jd.tdb + ltt_bary
-            time_helio = time_jd.utc + ltt_helio
-
-            if master_bias is not None:
-                print(f'Subtracting master bias from {filename}')
-                fd -= master_bias
-                print(f'After bias subtraction, mean pixel value for {filename}: {np.mean(fd)}')
-            if master_dark is not None:
-                fd -= master_dark * hdr['EXPTIME'] / 10
-            if master_flat is not None:
-                print(f'Dividing by master flat from {filename}')
-                fd /= master_flat
-
+            fd, hdr, basename = reduce_image(filename, master_bias, master_dark, master_flat)
             reduced_data.append(fd)
             reduced_header_info.append(hdr)
-            filenames.append(os.path.basename(filename))
+            filenames.append(basename)
         except Exception as e:
             print(f'Failed to process {filename}. Exception: {str(e)}')
             continue
