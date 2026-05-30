@@ -28,57 +28,64 @@ EXCLUDED_SCIENCE_WORDS = (
     "bias", "dark", "flat", "morning", "evening", "catalog", "phot"
 )
 
-CAMERA_CONFIG = {
-    "ccd": {
-        "scale_min": 4.5,
-        "scale_max": 5.5,
-        "ra_key": "CMD_RA",
-        "dec_key": "CMD_DEC",
-        "box_size": 3,
-        "prefix_chars": None,
-    },
-    "cmos": {
-        "scale_min": 3.5,
-        "scale_max": 4.5,
-        "ra_key": "TELRAD",
-        "dec_key": "TELDECD",
-        "box_size": 3,
-        "prefix_chars": 11,
-    },
-    "imx571": {
-        "scale_min": 0.1,
-        "scale_max": 0.5,
-        "ra_key": "MNTRAD",
-        "dec_key": "MNTDECD",
-        "box_size": 1,
-        "prefix_chars": None,
-    },
-    "qhy600": {
-        "scale_min": 0.1,
-        "scale_max": 0.5,
-        "ra_key": "MNTRAD",
-        "dec_key": "MNTDECD",
-        "box_size": 1,
-        "prefix_chars": None,
-    },
+DEFAULT_LOCATION = {
+    "lat": -24.615662,
+    "lon": -70.391809,
+    "height": 2433,
+}
+
+DEFAULT_SCINTILLATION = {
+    "diameter": 0.2,
+    "h": DEFAULT_LOCATION["height"],
+    "H": 8000,
+    "c_y": 1.56,
 }
 
 
-def normalise_camera(camera):
+def camera_config_path(camera):
     """
-    Return a canonical camera name used by the pipeline configuration.
+    Resolve a camera config name or path to a JSON file.
     """
-    camera_key = camera.lower()
-    if camera_key not in CAMERA_CONFIG:
-        raise ValueError(f"Unsupported camera type: {camera}")
-    return camera_key
+    candidates = []
+    if camera:
+        candidates.append(camera)
+        if not camera.endswith(".json"):
+            candidates.append(f"{camera}.json")
+        camera_lower = camera.lower()
+        candidates.append(camera_lower)
+        if not camera_lower.endswith(".json"):
+            candidates.append(f"{camera_lower}.json")
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    for candidate in list(candidates):
+        candidates.append(os.path.join(script_dir, candidate))
+        candidates.append(os.path.join(script_dir, "configs", candidate))
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+
+    raise FileNotFoundError(f"Camera config not found: {camera}")
 
 
 def camera_config(camera):
     """
-    Return plate-scale and header keyword settings for a camera.
+    Return plate-scale, detector, and pipeline settings from a camera JSON file.
     """
-    return CAMERA_CONFIG[normalise_camera(camera)]
+    path = camera_config_path(camera)
+    with open(path, "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+    config["config_path"] = path
+    config.setdefault("name", os.path.splitext(os.path.basename(path))[0])
+    config.setdefault("workers", 1)
+    config.setdefault("location", DEFAULT_LOCATION.copy())
+    config["location"] = {**DEFAULT_LOCATION, **config["location"]}
+    config.setdefault("scintillation", DEFAULT_SCINTILLATION.copy())
+    config["scintillation"] = {**DEFAULT_SCINTILLATION, **config["scintillation"]}
+    if "c_Y" in config["scintillation"]:
+        config["scintillation"]["c_y"] = config["scintillation"].pop("c_Y")
+    config["scintillation"].setdefault("h", config["location"]["height"])
+    return config
 
 
 def filter_science_filenames(directory=".", extra_excluded=()):
@@ -177,13 +184,14 @@ def plot_images():
     plt.rcParams['legend.fontsize'] = 14
 
 
-def get_location():
+def get_location(camera=None):
     """
     Get the location of the observatory
 
     Parameters
     ----------
-    None
+    camera : str or dict, optional
+        Camera config name/path or loaded config containing a ``location`` section.
 
     Returns
     -------
@@ -194,10 +202,17 @@ def get_location():
     ------
     None
     """
+    if isinstance(camera, dict):
+        location = {**DEFAULT_LOCATION, **camera.get("location", {})}
+    elif camera is not None:
+        location = camera_config(camera)["location"]
+    else:
+        location = DEFAULT_LOCATION
+
     site_location = EarthLocation(
-        lat=-24.615662 * u.deg,
-        lon=-70.391809 * u.deg,
-        height=2433 * u.m
+        lat=location["lat"] * u.deg,
+        lon=location["lon"] * u.deg,
+        height=location["height"] * u.m
     )
 
     return site_location
@@ -766,21 +781,42 @@ def calculate_trend_and_flux(time, flux, fluxerr, degree=2):
     return trend, dt_flux, dt_fluxerr
 
 
-def scintilation_noise(airmass_list, exposure):
+def scintillation_parameters(config=None):
+    """
+    Return scintillation settings from a loaded camera config or defaults.
+    """
+    params = DEFAULT_SCINTILLATION.copy()
+    if isinstance(config, dict):
+        location = config.get("location", {})
+        scintillation = config.get("scintillation", {})
+        params["diameter"] = scintillation.get(
+            "diameter", scintillation.get("D", params["diameter"])
+        )
+        params["h"] = scintillation.get(
+            "h", scintillation.get("height", location.get("height", params["h"]))
+        )
+        params["H"] = scintillation.get("H", params["H"])
+        params["c_y"] = scintillation.get(
+            "c_y", scintillation.get("c_Y", params["c_y"])
+        )
+    return params
+
+
+def scintilation_noise(airmass_list, exposure, config=None):
     # Following Osborne et al. 2015 for Paranal
-    D = 0.508  # telescope diameter
-    h = 2349  # height of Paranal
-    H = 8000  # height of atmospheric scale
+    params = scintillation_parameters(config)
+    D = params["diameter"]  # telescope diameter
+    h = params["h"]  # height of observatory
+    H = params["H"]  # height of atmospheric scale
     airmass = np.mean(airmass_list**3)  # airmass
-    C_y = 1.3  # constant
-    # C_y = 1.8
+    C_y = params["c_y"]  # atmospheric coefficient
     N = np.sqrt(10e-6 * (C_y ** 2) * (D ** (-4 / 3)) * (1 / exposure) * airmass * np.exp((-2. * h) / H))
     # print('Scintilation noise: ', N)
     # print('Airmass: ', airmass)
     return N
 
 
-def noise_sources(sky_list, bin_size, airmass_list, zp, aper, rn, dc, exposure, gain):
+def noise_sources(sky_list, bin_size, airmass_list, zp, aper, rn, dc, exposure, gain, config=None):
     """
     Returns the noise sources for a given flux
 
@@ -832,7 +868,7 @@ def noise_sources(sky_list, bin_size, airmass_list, zp, aper, rn, dc, exposure, 
     # set exposure time and random flux
     exposure_time = exposure
     synthetic_flux = np.arange(100, 1e7, 1000)
-    synthetic_mag = np.mean(zp) - 2.5 * np.log10(synthetic_flux/exposure_time)
+    synthetic_mag = np.mean(zp) + 2.5 * np.log10(gain) - 2.5 * np.log10(synthetic_flux / exposure_time)
     # set dark current rate from cmos characterisation
     dark_current = dc * exposure_time * npix
     dc_noise = np.sqrt(dark_current) / synthetic_flux / np.sqrt(bin_size) * 1000000  # Convert to ppm
@@ -850,7 +886,7 @@ def noise_sources(sky_list, bin_size, airmass_list, zp, aper, rn, dc, exposure, 
     # set random photon shot noise from the flux
     photon_shot_noise = np.sqrt(synthetic_flux) / synthetic_flux / np.sqrt(bin_size) * 1000000  # Convert to ppm
 
-    N = scintilation_noise(airmass_list, exposure)
+    N = scintilation_noise(airmass_list, exposure, config=config)
 
     N_sc = (N * synthetic_flux) ** 2
     N = N / np.sqrt(bin_size) * 1000000  # Convert to ppm
@@ -985,7 +1021,7 @@ def bin_by_time_interval(time, flux, error, interval_minutes=5):
     return np.array(binned_time), np.array(binned_flux), np.array(binned_error)
 
 
-def calc_noise(APER, EXPTIME, DC, GAIN, RN, AIRMASS, lc):
+def calc_noise(APER, EXPTIME, DC, GAIN, RN, AIRMASS, lc, config=None):
     """
     Work out the additional noise sources for the error bars
     Parameters
@@ -1014,7 +1050,7 @@ def calc_noise(APER, EXPTIME, DC, GAIN, RN, AIRMASS, lc):
     """
     npix = np.pi * APER ** 2
     dark_current = DC * npix * EXPTIME
-    SCINT = scintilation_noise(AIRMASS, EXPTIME)
+    SCINT = scintilation_noise(AIRMASS, EXPTIME, config=config)
     # scintillation?
     lc_err_new = np.sqrt(lc / GAIN + dark_current + npix * RN ** 2 + (SCINT * lc) ** 2)
     return lc_err_new
