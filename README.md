@@ -69,6 +69,12 @@ Important fields:
 
 `ra_key` and `dec_key` are the FITS header cards used for pointing. `prefix_chars` controls how `OBJECT` names are grouped into fields. `location` is used for barycentric time corrections. `scintillation` is used by the analytic noise model.
 
+`scale_min` and `scale_max` describe the native unbinned detector scale in
+arcseconds per pixel. During astrometric solving, the pipeline reads `CAM-BIN`
+or `HBIN_SZ`/`VBIN_SZ` from each FITS header and scales the search bounds for
+the effective binned image pixels. The solver prints both the native and
+effective ranges.
+
 `catalog` selects the VizieR source catalog used when a field catalog is first
 created. Supported values are `tic82` (the default) and `gaia_dr3`. Gaia DR3
 does not provide TIC IDs or TESS magnitudes, so the pipeline uses its Gaia
