@@ -28,6 +28,7 @@ from astropy.stats import sigma_clip, sigma_clipped_stats
 from astropy.coordinates import SkyCoord
 from astropy.table import Table, Column
 from matplotlib import pyplot as plt
+from utils_W1m import update_frame_diagnostics
 
 matplotlib.use('Agg')
 
@@ -169,6 +170,7 @@ def _detect_objects_sep(data, background_rms, area_min, area_max,
     objects['X'] = raw_objects['x'] + 1
     objects['Y'] = raw_objects['y'] + 1
     objects['FLUX'] = raw_objects['cflux']
+    objects['FWHM'] = 2.3548 * np.sqrt(raw_objects['a'] * raw_objects['b'])
     objects.sort('FLUX')
     objects.reverse()
     return objects
@@ -481,6 +483,15 @@ def fit_zeropoint_polynomial(catalog, objects, exptime, degree=2, sigma=3.0):
         return fit(model, objects['X'], objects['Y'], zp_delta_mag)
 
 
+def catalog_magnitude_system(catalog):
+    """
+    Return the magnitude system used for source selection and zero points.
+    """
+    if catalog.meta.get('MAGSYS'):
+        return catalog.meta['MAGSYS']
+    return 'G' if catalog.meta.get('CATALOG') == 'gaia_dr3' else 'TESS'
+
+
 def calculate_defocus_level(image):
     """
     Take an image and determine the level of defocus
@@ -748,9 +759,13 @@ def prepare_frame(input_path, output_path, catalog, defocus, force3rd, save_matc
         print("Post tweak stats: {}".format(line2))
 
         # Assume the last cycle of the fit did not change the cross-match, so the zero point stats remain the same
-        wcs_header['MAGZP_T'] = round(zp_mean, 3)
-        wcs_header['MAGZP_Ts'] = round(zp_stddev, 3)
-        wcs_header['MAGZP_Tc'] = np.sum(zp_filter)
+        mag_system = catalog_magnitude_system(catalog)
+        zp_suffix = 'G' if mag_system == 'G' else 'T'
+        wcs_header['MAGSYS'] = mag_system
+        wcs_header['MAGZP'] = round(zp_mean, 3)
+        wcs_header[f'MAGZP_{zp_suffix}'] = round(zp_mean, 3)
+        wcs_header[f'MAGZP_{zp_suffix}s'] = round(zp_stddev, 3)
+        wcs_header[f'MAGZP_{zp_suffix}c'] = np.sum(zp_filter)
 
         updated_wcs_header, xy_residuals = check_wcs_corners(wcs_header, objects[zp_filter],
                                                              matched_cat[zp_filter], frame_data.shape)
@@ -788,6 +803,14 @@ def prepare_frame(input_path, output_path, catalog, defocus, force3rd, save_matc
 
     # output the updated solved fits image
     fits.HDUList(hdu_list).writeto(output_path, overwrite=True)
+    update_frame_diagnostics(
+        input_path,
+        date_obs=output.header.get('DATE-OBS'),
+        mag_system=catalog_magnitude_system(catalog),
+        n_detected=len(objects),
+        n_matched=len(matched_cat[zp_filter]),
+        wcs_rms=float(np.sqrt(np.nanmean(np.asarray(xy_residuals, dtype=float) ** 2))),
+    )
 
     return wcs_header, objects[zp_filter], matched_cat[zp_filter], xy_residuals
 
@@ -1006,6 +1029,8 @@ def write_input_catalog(catalog, wcs_list, input_cat_file, IMAGE_WIDTH, IMAGE_HE
                            catalog_clipped['Tmag'], catalog_clipped['RA_CORR'], catalog_clipped['DEC_CORR'],
                            catalog_clipped['on_chip'], catalog_clipped['BPmag'],
                            catalog_clipped['RPmag']])
+    input_catalog.meta['CATALOG'] = catalog.meta.get('CATALOG', 'tic82')
+    input_catalog.meta['MAGSYS'] = catalog_magnitude_system(catalog)
 
     # finally save the input catalog
     try:
@@ -1198,7 +1223,7 @@ if __name__ == "__main__":
 
             # plot residuals versus brightness
             ax[4].semilogy(catalog_matched['Tmag'], residuals, 'k.')
-            ax[4].set_xlabel('T mag')
+            ax[4].set_xlabel(f"{catalog_magnitude_system(master_catalog)} mag")
             ax[4].set_ylabel('Delta XY (pix)')
 
             fig.tight_layout()
@@ -1209,7 +1234,15 @@ if __name__ == "__main__":
         # Check if the input catalog file already exists
         imcore_cat_name = "{}_input.fits".format(args.cat_file.split('.')[0])
 
-        if os.path.exists(imcore_cat_name):
+        generate_input_catalog = not os.path.exists(imcore_cat_name)
+        if not generate_input_catalog:
+            existing_input_catalog = Table.read(imcore_cat_name)
+            generate_input_catalog = (
+                existing_input_catalog.meta.get('CATALOG', 'tic82') != master_catalog.meta.get('CATALOG', 'tic82')
+                or catalog_magnitude_system(existing_input_catalog) != catalog_magnitude_system(master_catalog)
+            )
+
+        if not generate_input_catalog:
             print(f"{imcore_cat_name} already exists. Skipping generation and writing.")
         else:
             # update the master catalog with stars that are on chip
