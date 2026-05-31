@@ -1,0 +1,28 @@
+{
+  "name": "ccd",
+  "scale_min": 4.5,
+  "scale_max": 5.5,
+  "ra_key": "CMD_RA",
+  "dec_key": "CMD_DEC",
+  "box_size": 3,
+  "catalog": "gaia",
+  "prefix_chars": null,
+  "phot_aperture": 5,
+  "gain": 2.0,
+  "dark_current": 0.00515,
+  "read_noise": 12.9,
+  "exposure": 10.0,
+  "phot_estimate_radius_deg": 3.0,
+  "location": {
+    "lat": -24.615662,
+    "lon": -70.391809,
+    "height": 2433
+  },
+  "scintillation": {
+    "diameter": 0.2,
+    "h": 2433,
+    "H": 8000,
+    "c_Y": 1.56
+  },
+  "workers": 4
+}

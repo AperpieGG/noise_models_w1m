@@ -1,0 +1,28 @@
+{
+  "name": "cmos",
+  "scale_min": 3.5,
+  "scale_max": 4.5,
+  "ra_key": "TELRAD",
+  "dec_key": "TELDECD",
+  "box_size": 3,
+  "catalog": "tic82",
+  "prefix_chars": 11,
+  "phot_aperture": 5,
+  "gain": 1.13,
+  "dark_current": 1.6,
+  "read_noise": 1.56,
+  "exposure": 10.0,
+  "phot_estimate_radius_deg": 3.0,
+  "location": {
+    "lat": -24.615662,
+    "lon": -70.391809,
+    "height": 2433
+  },
+  "scintillation": {
+    "diameter": 0.2,
+    "h": 2433,
+    "H": 8000,
+    "c_Y": 1.56
+  },
+  "workers": 1
+}
