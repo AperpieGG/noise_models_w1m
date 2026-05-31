@@ -30,7 +30,10 @@ from utils_W1m import (
     camera_config,
     filter_science_filenames,
     group_filenames_by_object_prefix,
-    is_astrometrically_solved, plot_images
+    is_astrometrically_solved,
+    plot_frame_diagnostics,
+    plot_images,
+    update_frame_diagnostics,
 )
 
 plot_images()
@@ -226,6 +229,23 @@ def check_donuts(file_groups, workers=1):
 
         reference_image = file_group[0]
         logger.info(f"Reference image: {reference_image}")
+        with fits.open(reference_image) as hdulist:
+            reference_date_obs = hdulist[0].header.get("DATE-OBS")
+        reference_row = {
+            "filename": reference_image,
+            "date_obs": reference_date_obs,
+            "shift_x": 0.0,
+            "shift_y": 0.0,
+            "error": None,
+        }
+        shift_rows.append(reference_row)
+        update_frame_diagnostics(
+            reference_image,
+            date_obs=reference_date_obs,
+            shift_x=0.0,
+            shift_y=0.0,
+            shift_r=0.0,
+        )
 
         group_shift_rows = measure_group_shifts(reference_image, file_group[1:], workers)
 
@@ -240,6 +260,13 @@ def check_donuts(file_groups, workers=1):
             logger.info(f'{i} shift X: {sx} Y: {sy}')
 
             shift_rows.append(row)
+            update_frame_diagnostics(
+                i,
+                date_obs=row["date_obs"],
+                shift_x=sx,
+                shift_y=sy,
+                shift_r=np.hypot(sx, sy),
+            )
 
             all_sx.append(sx)
             all_sy.append(sy)
@@ -261,6 +288,7 @@ def check_donuts(file_groups, workers=1):
             logger.info("No shifts measured; scatter cannot be computed.")
 
     plot_shift_rows(shift_rows)
+    plot_frame_diagnostics()
 
 
 def plot_shift_rows(shift_rows):
@@ -271,9 +299,10 @@ def plot_shift_rows(shift_rows):
         logger.info("No Donuts shifts available for plotting.")
         return
 
+    plot_images()
     plot_dir = os.environ.get("PIPELINE_LOG_DIR", os.path.join(os.getcwd(), "logs"))
     os.makedirs(plot_dir, exist_ok=True)
-    plot_path = os.path.join(plot_dir, "donuts_pixel_shifts.png")
+    plot_path = os.path.join(plot_dir, "donuts_pixel_shifts.pdf")
 
     times = []
     labels = []
@@ -307,7 +336,7 @@ def plot_shift_rows(shift_rows):
         ax.set_xticklabels(labels, rotation=30, ha="right")
 
     fig.tight_layout()
-    fig.savefig(plot_path, dpi=150)
+    fig.savefig(plot_path, format="pdf", bbox_inches="tight")
     plt.close(fig)
     logger.info(f"Saved Donuts pixel shift plot to {plot_path}")
 
