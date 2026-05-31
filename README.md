@@ -100,6 +100,20 @@ rel_phot_<OBJECT>_summary.txt
 logs/
 ```
 
+The pipeline incrementally writes frame-level diagnostics into:
+
+```text
+logs/frame_diagnostics.csv
+logs/night_diagnostics.pdf
+logs/zeropoint_vs_airmass.pdf
+```
+
+The CSV contains one row per science image and combines measurements from the
+astrometric, Donuts-shift, and calibrated-photometry stages. The nightly plot
+shows airmass, zero point, sky background, median source FWHM, source counts,
+WCS residual RMS, and image shift versus time. The zero-point plot includes a
+linear fit versus airmass. Diagnostic plots are saved as vector PDFs.
+
 ## Script Reference
 
 ### `run.sh`
@@ -167,6 +181,7 @@ What it does:
 - Fits the WCS/distortion solution.
 - Writes the astrometric solution into the FITS header.
 - Optionally saves matched-catalog diagnostics.
+- Adds matched-source counts and WCS residual RMS to the nightly diagnostics.
 
 Example:
 
@@ -184,7 +199,8 @@ What it does:
 - Groups images by object prefix.
 - Uses Donuts to measure the shift of each image against the first image in its group.
 - Moves images with shifts of at least 1 pixel into `failed_donuts/`.
-- Writes `logs/donuts.log` and `logs/donuts_pixel_shifts.png`.
+- Writes `logs/donuts.log` and `logs/donuts_pixel_shifts.pdf`.
+- Adds X/Y and radial image shifts to `logs/frame_diagnostics.csv`.
 
 This script supports workers. The first image in each group is still the reference; all other images are independently compared against that reference.
 
@@ -234,6 +250,7 @@ What it does:
 - Uses WCS to place catalog sources on the image.
 - Runs aperture photometry with the configured aperture and gain.
 - Writes `phot_<OBJECT>.fits`.
+- Adds airmass, zero point, sky background, median source FWHM, and detected-source counts to the nightly diagnostics.
 
 This script supports workers across images.
 
