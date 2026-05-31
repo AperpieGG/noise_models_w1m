@@ -13,6 +13,7 @@ from utils_W1m import (
     filter_science_filenames,
     is_astrometrically_solved,
     object_prefix,
+    plot_frame_diagnostics,
     pointing_from_header,
 )
 
@@ -65,7 +66,21 @@ def run_solver(script_dir, cat_file, fits_file, scale_min, scale_max, args):
         cmd.extend(["--defocus", f"{args.defocus:.2f}"])
     if args.force3rd:
         cmd.append("--force3rd")
-    return subprocess.run(cmd, check=False).returncode
+    result = subprocess.run(cmd, check=False).returncode
+    remove_astrometric_diagnostics(fits_file)
+    return result
+
+
+def remove_astrometric_diagnostics(fits_file):
+    """
+    Remove per-image astrometric diagnostic plots after solving.
+    """
+    image_base = os.path.splitext(fits_file)[0]
+    for suffix in ("_quiver_plot.png", "_wcs_residuals.png"):
+        diagnostic = f"{image_base}{suffix}"
+        if os.path.exists(diagnostic):
+            os.remove(diagnostic)
+            print(f"Removed astrometric diagnostic: {diagnostic}")
 
 
 if __name__ == "__main__":
@@ -78,6 +93,7 @@ if __name__ == "__main__":
     print(f'Using camera type: {args.camera}')
     scale_min = config["scale_min"]
     scale_max = config["scale_max"]
+    mag_system = "G" if config["catalog"] == "gaia_dr3" else "TESS"
 
     # Get a list of all FITS images, exclude whatever has catalog name in
     all_fits = sorted([f for f in os.listdir(".") if f.endswith(".fits")])
@@ -101,9 +117,17 @@ if __name__ == "__main__":
     with fits.open(ref_image) as ff:
         ra, dec, epoch, box_size = pointing_from_header(ff[0].header, args.camera)
 
-    # Create the catalog if it doesn't exist
-    if not os.path.exists(cat_file):
-        print(f'Did not find catalog file: {cat_file}')
+    # Create the catalog if it doesn't exist or the configured source changed.
+    create_catalog = not os.path.exists(cat_file)
+    if not create_catalog:
+        with fits.open(cat_file) as hdulist:
+            existing_catalog = hdulist[1].header.get("CATALOG", "tic82").lower()
+        create_catalog = existing_catalog != config["catalog"].lower()
+        if create_catalog:
+            print(f"Catalog source changed from {existing_catalog} to {config['catalog']}.")
+
+    if create_catalog:
+        print(f'Creating catalog file: {cat_file}')
         cmd_args = [
             "python",
             str(script_dir / "make_ref_catalog_W1m.py"),
@@ -113,6 +137,8 @@ if __name__ == "__main__":
             box_size,
             epoch,
             cat_file,
+            "--catalog",
+            config["catalog"],
         ]
         subprocess.run(cmd_args, check=True)
         print("Catalog created for image {} with prefix: {}\n".format(ref_image, prefix))
@@ -138,7 +164,8 @@ if __name__ == "__main__":
 
                 if current_prefix.startswith(prefix):
                     if "_cat" not in fits_file and fits_file != ref_image:
-                        if is_astrometrically_solved(hdulist[0].header):
+                        solved_mag_system = hdulist[0].header.get("MAGSYS", "TESS")
+                        if is_astrometrically_solved(hdulist[0].header) and solved_mag_system == mag_system:
                             print(f"Image {fits_file} is already solved. Skipping..\n")
                             continue
 
@@ -150,3 +177,5 @@ if __name__ == "__main__":
                             continue  # Skip this image and move to the next
                         else:
                             print(f"Successfully solved the image {fits_file}.\n")
+
+        plot_frame_diagnostics()
