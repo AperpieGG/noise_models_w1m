@@ -28,6 +28,8 @@ class NumpyEncoder(json.JSONEncoder):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Build a noise-model JSON from rel_phot_*.fits.")
+    parser.add_argument("directory", nargs="?", default=".",
+                        help="Directory containing rel_phot_*.fits and phot_*.fits files.")
     parser.add_argument("--rel-file", type=str, default=None, help="Combined rel_phot_*.fits file.")
     parser.add_argument("--phot-file", type=str, default=None, help="Matching phot_*.fits file.")
     parser.add_argument("--output", type=str, default=None, help="Output JSON filename.")
@@ -37,27 +39,27 @@ def parse_args():
     return parser.parse_args()
 
 
-def find_first_file(prefix):
-    matches = sorted(name for name in os.listdir(".") if name.startswith(prefix) and name.endswith(".fits"))
+def find_first_file(prefix, directory="."):
+    matches = sorted(name for name in os.listdir(directory) if name.startswith(prefix) and name.endswith(".fits"))
     if not matches:
         return None
-    return matches[0]
+    return os.path.join(directory, matches[0])
 
 
-def default_rel_file():
-    rel_file = find_first_file("rel_phot_")
+def default_rel_file(directory="."):
+    rel_file = find_first_file("rel_phot_", directory)
     if rel_file is None:
-        raise FileNotFoundError("No rel_phot_*.fits file found in the current directory.")
+        raise FileNotFoundError(f"No rel_phot_*.fits file found in {directory}.")
     return rel_file
 
 
-def matching_phot_file(rel_file):
+def matching_phot_file(rel_file, directory="."):
     basename = os.path.basename(rel_file)
     if basename.startswith("rel_phot_"):
-        candidate = "phot_" + basename[len("rel_phot_"):]
+        candidate = os.path.join(directory, "phot_" + basename[len("rel_phot_"):])
         if os.path.exists(candidate):
             return candidate
-    return find_first_file("phot_")
+    return find_first_file("phot_", directory)
 
 
 def field_name_from_rel_file(rel_file):
@@ -123,8 +125,9 @@ def phot_metadata(phot_table, tic_id, aperture):
 
     sky = np.asarray(rows[sky_col], dtype=float) - np.asarray(rows[flux_col], dtype=float)
     color = masked_float_or_nan(rows["gaiabp"][0]) - masked_float_or_nan(rows["gaiarp"][0])
+    mag_column = "MAG" if "MAG" in rows.colnames else "Tmag"
     return {
-        "Tmag": float(rows["Tmag"][0]),
+        "MAG": float(rows[mag_column][0]),
         "COLOR": color,
         "sky_median": float(np.nanmedian(sky)),
         "sky_mean": float(np.nanmean(sky)),
@@ -137,7 +140,7 @@ def build_noise_model(rel_table, phot_table, aperture, bin_size, config):
     tic_ids = sorted(int(tic_id) for tic_id in np.unique(rel_table["tic_id"]))
 
     rms_list = []
-    tmags = []
+    magnitudes = []
     colors = []
     output_tic_ids = []
     sky_values = []
@@ -156,7 +159,7 @@ def build_noise_model(rel_table, phot_table, aperture, bin_size, config):
 
         output_tic_ids.append(tic_id)
         rms_list.append(rms)
-        tmags.append(metadata["Tmag"])
+        magnitudes.append(metadata["MAG"])
         colors.append(metadata["COLOR"])
         sky_values.append(metadata["sky_mean"])
         all_airmass.extend(metadata["airmass"][np.isfinite(metadata["airmass"])])
@@ -182,10 +185,10 @@ def build_noise_model(rel_table, phot_table, aperture, bin_size, config):
         config=config,
     )
 
-    return {
+    result = {
         "TIC_IDs": output_tic_ids,
         "RMS_list": rms_list,
-        "Tmag_list": tmags,
+        "magnitude_list": magnitudes,
         "COLOR": colors,
         "synthetic_mag": synthetic_mag,
         "photon_shot_noise": psn,
@@ -198,22 +201,28 @@ def build_noise_model(rel_table, phot_table, aperture, bin_size, config):
         "mean_zp": float(np.mean(all_zp)),
         "mean_airmass": float(np.mean(all_airmass)),
     }
+    magnitude_key = "Gmag_list" if config["catalog"] == "gaia_dr3" else "Tmag_list"
+    result[magnitude_key] = magnitudes
+    return result
 
 
 def main():
     args = parse_args()
     config = camera_config(args.cam)
     aperture = args.aperture if args.aperture is not None else config["phot_aperture"]
+    directory = os.path.abspath(args.directory)
 
-    rel_file = args.rel_file or default_rel_file()
-    phot_file = args.phot_file or matching_phot_file(rel_file)
+    rel_file = args.rel_file or default_rel_file(directory)
+    phot_file = args.phot_file or matching_phot_file(rel_file, directory)
     if phot_file is None:
         raise FileNotFoundError("No matching phot_*.fits file found. Pass --phot-file explicitly.")
 
     rel_table = Table.read(rel_file)
     phot_table = Table.read(phot_file)
     camera_name = config["name"]
-    output = args.output or f"noise_model_{field_name_from_rel_file(rel_file)}_{camera_name}_bin{args.bin_size}.json"
+    output = args.output or os.path.join(
+        directory, f"noise_model_{field_name_from_rel_file(rel_file)}_{camera_name}_bin{args.bin_size}.json"
+    )
 
     print(f"Relative photometry file: {rel_file}")
     print(f"Photometry file: {phot_file}")
@@ -224,6 +233,8 @@ def main():
     data["phot_file"] = phot_file
     data["camera"] = camera_name
     data["camera_config"] = config["config_path"]
+    data["catalog"] = config["catalog"]
+    data["magnitude_system"] = "G" if config["catalog"] == "gaia_dr3" else "TESS"
     data["location"] = config["location"]
     data["scintillation"] = config["scintillation"]
     data["aperture"] = aperture
