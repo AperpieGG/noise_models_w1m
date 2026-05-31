@@ -3,6 +3,7 @@ Functions for handling on-sky or on chip coordinates
 """
 import fnmatch
 import glob
+import csv
 import json
 import os
 from datetime import datetime, timedelta
@@ -41,6 +42,42 @@ DEFAULT_SCINTILLATION = {
     "c_y": 1.56,
 }
 
+FRAME_DIAGNOSTIC_FIELDS = (
+    "filename",
+    "date_obs",
+    "airmass",
+    "zp",
+    "mag_system",
+    "sky_median",
+    "sky_rms",
+    "median_fwhm",
+    "n_detected",
+    "n_matched",
+    "wcs_rms",
+    "shift_x",
+    "shift_y",
+    "shift_r",
+)
+
+CATALOG_ALIASES = {
+    "tic": "tic82",
+    "tic8": "tic82",
+    "tic8.2": "tic82",
+    "iv/39/tic82": "tic82",
+    "gaia": "gaia_dr3",
+    "gaiadr3": "gaia_dr3",
+    "gaia-dr3": "gaia_dr3",
+    "i/355/gaiadr3": "gaia_dr3",
+}
+
+
+def normalize_catalog_name(catalog):
+    """
+    Return the canonical name for a supported catalog alias.
+    """
+    catalog = catalog.lower()
+    return CATALOG_ALIASES.get(catalog, catalog)
+
 
 def camera_config_path(camera):
     """
@@ -78,6 +115,7 @@ def camera_config(camera):
     config["config_path"] = path
     config.setdefault("name", os.path.splitext(os.path.basename(path))[0])
     config.setdefault("workers", 1)
+    config["catalog"] = normalize_catalog_name(config.get("catalog", "tic82"))
     config.setdefault("location", DEFAULT_LOCATION.copy())
     config["location"] = {**DEFAULT_LOCATION, **config["location"]}
     config.setdefault("scintillation", DEFAULT_SCINTILLATION.copy())
@@ -182,6 +220,132 @@ def plot_images():
     plt.rcParams['legend.loc'] = 'best'
     plt.rcParams['legend.fancybox'] = True
     plt.rcParams['legend.fontsize'] = 14
+
+
+def diagnostics_log_dir():
+    """
+    Return the configured pipeline log directory.
+    """
+    return os.environ.get("PIPELINE_LOG_DIR", os.path.join(os.getcwd(), "logs"))
+
+
+def update_frame_diagnostics(filename, **values):
+    """
+    Merge frame-level measurements into ``logs/frame_diagnostics.csv``.
+    """
+    log_dir = diagnostics_log_dir()
+    os.makedirs(log_dir, exist_ok=True)
+    output_path = os.path.join(log_dir, "frame_diagnostics.csv")
+    rows = {}
+
+    if os.path.exists(output_path):
+        with open(output_path, "r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                rows[row["filename"]] = row
+
+    basename = os.path.basename(filename)
+    row = rows.get(basename, {field: "" for field in FRAME_DIAGNOSTIC_FIELDS})
+    row["filename"] = basename
+    for key, value in values.items():
+        if key not in FRAME_DIAGNOSTIC_FIELDS or value is None:
+            continue
+        if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+            continue
+        row[key] = value
+    rows[basename] = row
+
+    with open(output_path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=FRAME_DIAGNOSTIC_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows[name] for name in sorted(rows))
+    return output_path
+
+
+def _diagnostic_float(row, key):
+    """
+    Parse an optional numeric CSV value for diagnostics plotting.
+    """
+    try:
+        return float(row[key])
+    except (KeyError, TypeError, ValueError):
+        return np.nan
+
+
+def plot_frame_diagnostics():
+    """
+    Plot nightly frame diagnostics collected by the pipeline stages.
+    """
+    log_dir = diagnostics_log_dir()
+    csv_path = os.path.join(log_dir, "frame_diagnostics.csv")
+    if not os.path.exists(csv_path):
+        return None
+
+    with open(csv_path, "r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    if not rows:
+        return None
+
+    plot_images()
+
+    def sort_key(row):
+        try:
+            return Time(row["date_obs"], format="isot").unix
+        except (KeyError, TypeError, ValueError):
+            return np.inf
+
+    rows.sort(key=sort_key)
+    parsed_times = []
+    for row in rows:
+        try:
+            parsed_times.append(Time(row["date_obs"], format="isot").datetime)
+        except (KeyError, TypeError, ValueError):
+            parsed_times.append(None)
+    times = parsed_times if all(time is not None for time in parsed_times) else list(range(len(rows)))
+
+    panels = (
+        ("airmass", "Airmass"),
+        ("zp", "Zero point"),
+        ("sky_median", "Sky median"),
+        ("sky_rms", "Sky RMS"),
+        ("median_fwhm", "Median FWHM (pix)"),
+        ("n_detected", "Detected sources"),
+        ("n_matched", "WCS matched sources"),
+        ("wcs_rms", "WCS RMS (pix)"),
+        ("shift_r", "Donuts shift (pix)"),
+    )
+    fig, axes = plt.subplots(len(panels), 1, figsize=(10, 18), sharex=True)
+    for ax, (key, label) in zip(axes, panels):
+        values = [_diagnostic_float(row, key) for row in rows]
+        ax.plot(times, values, marker=".", linewidth=1)
+        ax.set_ylabel(label, fontsize=12)
+        ax.grid(alpha=0.25)
+    axes[-1].set_xlabel("Time")
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    summary_path = os.path.join(log_dir, "night_diagnostics.pdf")
+    fig.savefig(summary_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+
+    airmass = np.asarray([_diagnostic_float(row, "airmass") for row in rows])
+    zp = np.asarray([_diagnostic_float(row, "zp") for row in rows])
+    valid = np.isfinite(airmass) & np.isfinite(zp)
+    if np.sum(valid) >= 2:
+        slope, intercept = np.polyfit(airmass[valid], zp[valid], 1)
+        x_fit = np.linspace(np.min(airmass[valid]), np.max(airmass[valid]), 100)
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.scatter(airmass[valid], zp[valid], s=18)
+        ax.plot(x_fit, slope * x_fit + intercept, color="tab:red",
+                label=f"slope = {slope:.3f} mag / airmass")
+        ax.set_xlabel("Airmass")
+        ax.set_ylabel("Zero point")
+        ax.grid(alpha=0.25)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(log_dir, "zeropoint_vs_airmass.pdf"),
+                    format="pdf", bbox_inches="tight")
+        plt.close(fig)
+
+    return summary_path
 
 
 def get_location(camera=None):
@@ -413,6 +577,7 @@ def _detect_objects_sep(data, background_rms, area_min, area_max,
     objects['X'] = raw_objects['x'] + 1
     objects['Y'] = raw_objects['y'] + 1
     objects['FLUX'] = raw_objects['cflux']
+    objects['FWHM'] = 2.3548 * np.sqrt(raw_objects['a'] * raw_objects['b'])
     objects.sort('FLUX')
     objects.reverse()
     return objects
@@ -912,7 +1077,7 @@ def extract_airmass_zp(table, image_directory):
         with fits.open(fits_file_path) as hdul:
             image_header = hdul[0].header
             airmass = round(image_header['AIRMASS'], 3)
-            zp = image_header['MAGZP_T']
+            zp = image_header.get('MAGZP', image_header.get('MAGZP_T', image_header.get('MAGZP_G')))
 
         # Append airmass value and frame ID to the list
         airmass_list.append(airmass)
@@ -927,7 +1092,7 @@ def extract_airmass_zp(table, image_directory):
 def extract_airmass_and_zp(header):
     """Extract airmass and zero point from the FITS header."""
     airmass = header.get('AIRMASS', None)
-    zp = header.get('MAGZP_T', None)
+    zp = header.get('MAGZP', header.get('MAGZP_T', header.get('MAGZP_G', None)))
     return airmass, zp
 
 
