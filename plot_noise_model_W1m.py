@@ -23,11 +23,11 @@ def load_rms_mags_data(filename):
     return data
 
 
-def mask_outliers_by_model(Tmag_list, RMS_list, color_list, synthetic_mag, RNS, deviation_factor=2):
+def mask_outliers_by_model(magnitude_list, RMS_list, color_list, synthetic_mag, RNS, deviation_factor=2):
     """
     Mask stars that have an RMS significantly higher than the model.
     Args:
-        Tmag_list (list): List of magnitudes (Tmag).
+        magnitude_list (list): List of magnitudes.
         RMS_list (list): List of RMS values.
         color_list (list): List of color values.
         synthetic_mag (list): Synthetic magnitude values for the model.
@@ -37,8 +37,8 @@ def mask_outliers_by_model(Tmag_list, RMS_list, color_list, synthetic_mag, RNS, 
     Returns:
         masked_indices (list): Indices of stars that deviate from the model.
     """
-    # Interpolate model RMS values to match Tmag_list
-    model_rms_interp = np.interp(Tmag_list, synthetic_mag, RNS)
+    # Interpolate model RMS values to match the measured magnitudes.
+    model_rms_interp = np.interp(magnitude_list, synthetic_mag, RNS)
     masked_indices = [i for i, (rms, model_rms) in enumerate(zip(RMS_list, model_rms_interp))
                       if rms > model_rms * deviation_factor]
 
@@ -48,7 +48,8 @@ def mask_outliers_by_model(Tmag_list, RMS_list, color_list, synthetic_mag, RNS, 
 def plot_noise_model(data):
     fig, ax = plt.subplots(figsize=(8.5, 6))
     RMS_list = np.asarray(data['RMS_list'], dtype=float)
-    Tmag_list = np.asarray(data['Tmag_list'], dtype=float)
+    magnitude_list = np.asarray(data.get('magnitude_list', data.get('Tmag_list')), dtype=float)
+    magnitude_system = data.get('magnitude_system', 'TESS')
     color_list = np.asarray(data['COLOR'], dtype=float)
     synthetic_mag = np.asarray(data['synthetic_mag'], dtype=float)
     RNS = np.asarray(data['RNS'], dtype=float)
@@ -60,8 +61,8 @@ def plot_noise_model(data):
     print(f'The average scintillation noise is: {np.nanmean(scintillation_noise)}')
 
     # Filter out stars with missing color information
-    valid = np.isfinite(Tmag_list) & np.isfinite(RMS_list) & np.isfinite(color_list) & (RMS_list > 0)
-    total_mags = Tmag_list[valid]
+    valid = np.isfinite(magnitude_list) & np.isfinite(RMS_list) & np.isfinite(color_list) & (RMS_list > 0)
+    total_mags = magnitude_list[valid]
     total_RMS = RMS_list[valid]
     total_colors = color_list[valid]
 
@@ -87,7 +88,7 @@ def plot_noise_model(data):
             color='orange', label='scintillation noise', linestyle='--')
 
     # Plot formatting
-    ax.set_xlabel('TESS Magnitude')
+    ax.set_xlabel('Gaia G Magnitude' if magnitude_system == 'G' else 'TESS Magnitude')
     ax.set_ylabel('RMS (ppm)')
     ax.set_yscale('log')
     ax.set_xlim(7.5, 14)
@@ -102,7 +103,7 @@ def output_name(json_file, output):
     if output:
         return output
     root, _ = os.path.splitext(os.path.basename(json_file))
-    return f"{root}.png"
+    return os.path.join(os.path.dirname(json_file), f"{root}.png")
 
 
 def main(json_file, output):
