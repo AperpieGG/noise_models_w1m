@@ -9,7 +9,8 @@ from calibration_images_W1m import load_calibration_masters, reduce_image
 from utils_W1m import (camera_config, filter_science_filenames, get_location,
                        group_filenames_by_object_prefix,
                        wcs_phot, _detect_objects_sep, get_catalog,
-                       extract_airmass_and_zp, get_light_travel_times)
+                       extract_airmass_and_zp, get_light_travel_times,
+                       plot_frame_diagnostics, update_frame_diagnostics)
 import warnings
 import logging
 from astropy.io import fits
@@ -125,6 +126,7 @@ def process_frame(filename):
     masters = context["masters"]
     phot_cat = context["phot_cat"]
     site_location = context["site_location"]
+    mag_system = context["mag_system"]
 
     reduced_data, frame_hdr, _ = reduce_image(filename, *masters, site_location=site_location)
     frame_data = reduced_data
@@ -140,10 +142,20 @@ def process_frame(filename):
 
     frame_objects = _detect_objects_sep(frame_data_corr_no_bg, frame_bg.globalrms,
                                         AREA_MIN, AREA_MAX, DETECTION_SIGMA, DEFOCUS)
+    diagnostics = {
+        "date_obs": frame_hdr.get("DATE-OBS"),
+        "airmass": airmass,
+        "zp": zp,
+        "mag_system": mag_system,
+        "sky_median": float(np.nanmedian(frame_bg.back())),
+        "sky_rms": float(np.nanmedian(bg_rms)),
+        "median_fwhm": float(np.nanmedian(frame_objects["FWHM"])),
+        "n_detected": len(frame_objects),
+    }
     if len(frame_objects) < N_OBJECTS_LIMIT:
         return filename, None, (
             f"Fewer than {N_OBJECTS_LIMIT} objects found in {filename}, skipping photometry!"
-        )
+        ), diagnostics
 
     phot_ra = catalog_column(phot_cat, "ra_deg_corr", "RA_CORR")
     phot_dec = catalog_column(phot_cat, "dec_deg_corr", "DEC_CORR")
@@ -162,11 +174,12 @@ def process_frame(filename):
     time_bary = time_jd.tdb + ltt_bary
 
     frame_ids = [filename for i in range(len(phot_x))]
-    frame_preamble = Table([frame_ids, phot_cat['Tmag'], phot_tic,
+    phot_mag = phot_cat['Gmag'] if mag_system == "G" else phot_cat['Tmag']
+    frame_preamble = Table([frame_ids, phot_mag, phot_cat['Tmag'], phot_tic,
                             phot_bp, phot_rp, time_jd.value, time_bary.value,
                             phot_x, phot_y,
                             [airmass] * len(phot_x), [zp] * len(phot_x)],
-                           names=("frame_id", "Tmag", "tic_id", "gaiabp", "gaiarp", "jd_mid",
+                           names=("frame_id", "MAG", "Tmag", "tic_id", "gaiabp", "gaiarp", "jd_mid",
                                   "jd_bary", "x", "y", "airmass", "zp"))
 
     frame_phot = wcs_phot(frame_data, phot_x, phot_y, aperture_radii, frame_data_corr_no_bg, bg_rms,
@@ -179,7 +192,7 @@ def process_frame(filename):
         f"Finished photometry for {filename}; "
         f"coord keys {ra_key}/{dec_key}: {estimate_coord.to_string('decimal')}"
     )
-    return filename, frame_output, message
+    return filename, frame_output, message, diagnostics
 
 
 def process_frames(prefix_filenames, context, workers):
@@ -195,7 +208,7 @@ def process_frames(prefix_filenames, context, workers):
                 try:
                     results.append(future.result())
                 except Exception as exc:
-                    results.append((filename, None, f"Failed photometry for {filename}: {exc}"))
+                    results.append((filename, None, f"Failed photometry for {filename}: {exc}", None))
     except (OSError, PermissionError) as exc:
         logging.warning(f"Multiprocessing unavailable ({exc}); falling back to 1 worker.")
         return [process_frame(filename) for filename in prefix_filenames]
@@ -214,6 +227,7 @@ def main():
     estimate_coord_radius = config["phot_estimate_radius_deg"] * u.deg
     workers = max(1, args.workers if args.workers is not None else config["workers"])
     site_location = get_location(config)
+    mag_system = "G" if config["catalog"] == "gaia_dr3" else "TESS"
 
     # set directory for the current working directory
     directory = os.getcwd()
@@ -237,8 +251,12 @@ def main():
 
         # Open the photometry file for the current prefix
         if os.path.exists(phot_output_filename):
-            logging.info(f"Photometry file for prefix {prefix} already exists, skipping to the next prefix.")
-            continue
+            existing_phot_table = Table.read(phot_output_filename)
+            if (existing_phot_table.meta.get("CATALOG", "tic82") == config["catalog"]
+                    and existing_phot_table.meta.get("MAGSYS", "TESS") == mag_system):
+                logging.info(f"Photometry file for prefix {prefix} already exists, skipping to the next prefix.")
+                continue
+            logging.info(f"Photometry metadata changed for prefix {prefix}; rebuilding the output file.")
 
         logging.info(f"Creating new photometry file for prefix {prefix}.")
 
@@ -257,23 +275,29 @@ def main():
             "masters": masters,
             "phot_cat": phot_cat,
             "site_location": site_location,
+            "mag_system": mag_system,
         }
         init_worker(context)
         frame_results = process_frames(prefix_filenames, context, workers)
         phot_tables = []
-        for filename, frame_table, message in frame_results:
+        for filename, frame_table, message, diagnostics in frame_results:
             logging.info(message)
+            if diagnostics is not None:
+                update_frame_diagnostics(filename, **diagnostics)
             if frame_table is not None:
                 phot_tables.append(frame_table)
 
         # Save the photometry for the current prefix
         if phot_tables:
             phot_table = vstack(phot_tables)
+            phot_table.meta["CATALOG"] = config["catalog"]
+            phot_table.meta["MAGSYS"] = mag_system
             phot_table.write(phot_output_filename, overwrite=True)
             logging.info(f"Saved photometry for prefix {prefix} to {phot_output_filename}")
         else:
             logging.info(f"No photometry data for prefix {prefix}.")
 
+    plot_frame_diagnostics()
     logging.info("Done!")
 
 
