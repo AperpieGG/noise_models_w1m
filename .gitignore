@@ -9,3 +9,7 @@ __pycache__/
 
 # JetBrains IDE metadata
 .idea/
+
+# Generated pipeline products
+*.fits
+logs/
