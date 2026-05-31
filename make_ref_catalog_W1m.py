@@ -13,6 +13,65 @@ from astroquery.vizier import Vizier
 # Suppress Astropy UnitsWarnings
 warnings.simplefilter('ignore', UnitsWarning)
 
+CATALOGS = {
+    "tic82": {
+        "vizier_id": "IV/39/tic82",
+        "aliases": ("tic", "tic8", "tic8.2", "IV/39/tic82"),
+        "columns": ("TIC", "GAIA", "RAJ2000", "DEJ2000", "Tmag", "Gmag",
+                    "BPmag", "RPmag", "pmRA", "pmDE", "Teff"),
+        "magnitude_column": "Tmag",
+        "reference_epoch": "2000-01-01T00:00:00",
+    },
+    "gaia_dr3": {
+        "vizier_id": "I/355/gaiadr3",
+        "aliases": ("gaia", "gaiadr3", "gaia-dr3", "I/355/gaiadr3"),
+        "columns": ("Source", "RA_ICRS", "DE_ICRS", "Gmag", "BPmag", "RPmag",
+                    "pmRA", "pmDE"),
+        "magnitude_column": "Gmag",
+        "reference_epoch": "2016-01-01T00:00:00",
+    },
+}
+
+
+def resolve_catalog(catalog_name):
+    """
+    Resolve a supported catalog alias to its VizieR query configuration.
+    """
+    requested = catalog_name.lower()
+    for name, config in CATALOGS.items():
+        aliases = tuple(alias.lower() for alias in config["aliases"])
+        if requested == name or requested in aliases:
+            return name, config
+
+    supported = ", ".join(sorted(CATALOGS))
+    raise ValueError(f"Unsupported catalog {catalog_name!r}. Supported catalogs: {supported}")
+
+
+def normalize_catalog(catalog, catalog_name):
+    """
+    Convert supported VizieR tables to the column contract used by the pipeline.
+
+    Gaia DR3 has no TIC identifier or TESS magnitude. Its source identifier and
+    G magnitude are retained in those compatibility columns so downstream
+    astrometry and photometry continue to work.
+    """
+    if catalog_name == "gaia_dr3":
+        catalog["GAIA"] = catalog["Source"]
+        catalog["TIC"] = catalog["Source"]
+        catalog["RAJ2000"] = catalog["RA_ICRS"]
+        catalog["DEJ2000"] = catalog["DE_ICRS"]
+        catalog["Tmag"] = catalog["Gmag"]
+        catalog["Teff"] = np.full(len(catalog), np.nan)
+
+    required = ("TIC", "GAIA", "RAJ2000", "DEJ2000", "Tmag", "Gmag",
+                "BPmag", "RPmag", "pmRA", "pmDE")
+    missing = [column for column in required if column not in catalog.colnames]
+    if missing:
+        raise ValueError(
+            f"Catalog {catalog_name!r} is missing required columns: {', '.join(missing)}"
+        )
+    return catalog
+
 
 def arg_parse():
     """
@@ -44,8 +103,8 @@ def arg_parse():
                         help='Maximum magnitude delta for a star to be considered as blended.')
     parser.add_argument('--catalog',
                         type=str,
-                        default='IV/39/tic82',
-                        help='Vizier catalog ID to query (default: TIC8).')
+                        default='tic82',
+                        help='Catalog alias to query: tic82 or gaia_dr3 (default: tic82).')
     return parser.parse_args()
 
 
@@ -222,29 +281,33 @@ def query_vizier(center, width, height, catalog='IV/39/tic82'):
 
 
 def fetch_catalog_vizier(ra_center, dec_center, box_width, box_height,
-                         reference_epoch, output_path, blend_delta, catalog_id="IV/38/tic"):
+                         reference_epoch, output_path, blend_delta, catalog_id="tic82"):
     """
     Fetch catalog from Vizier, apply proper motion corrections, perform blending checks,
     and output the catalog to a FITS file. Returns the processed catalog and metadata.
     """
 
+    catalog_name, catalog_config = resolve_catalog(catalog_id)
+    vizier_id = catalog_config["vizier_id"]
+
     # Query Vizier for data with additional columns
     print("Fetching catalog from Vizier...")
+    print(f"Using catalog {catalog_name}: {vizier_id}")
     Vizier.ROW_LIMIT = -1
     vizier_query = Vizier(
-        columns=["TIC", "GAIA", "RAJ2000", "DEJ2000", "Tmag", "Gmag", "BPmag", "RPmag", "pmRA", "pmDE", "Teff"],
-        column_filters={"Tmag": "<16"}  # Filter for Gaia magnitude < 16
+        columns=list(catalog_config["columns"]),
+        column_filters={catalog_config["magnitude_column"]: "<16"}
     )
     vizier_query.ROW_LIMIT = -1  # Set the row limit after creating the Vizier instance
     try:
         catalog = vizier_query.query_region(SkyCoord(ra=ra_center, dec=dec_center, unit=(u.deg, u.deg)),
                                             width=box_width * u.deg, height=box_height * u.deg,
-                                            catalog=catalog_id)
+                                            catalog=vizier_id)
         if len(catalog) == 0:
-            print(f"No data found in catalog {catalog_id}.")
+            print(f"No data found in catalog {vizier_id}.")
             return None, None, None
 
-        catalog = catalog[0]  # Use the first table
+        catalog = normalize_catalog(catalog[0], catalog_name)
     except Exception as e:
         print(f"Failed to fetch data from Vizier: {e}")
         return None, None, None
@@ -254,7 +317,7 @@ def fetch_catalog_vizier(ra_center, dec_center, box_width, box_height,
     # Fetch column names and types
     print("Fetching column descriptions...")
     try:
-        col_ids, col_types = grab_table_description_vizier(catalog_id)
+        col_ids, col_types = grab_table_description_vizier(vizier_id)
         print(f"Column names: {col_ids}")
     except Exception as e:
         print(f"Error fetching column descriptions: {e}")
@@ -262,7 +325,8 @@ def fetch_catalog_vizier(ra_center, dec_center, box_width, box_height,
 
     # Apply proper motion corrections
     reference_epoch = Time(reference_epoch, scale='utc')
-    delta_years = (reference_epoch - Time('2000-01-01T00:00:00')).to(u.year).value
+    catalog_epoch = Time(catalog_config["reference_epoch"], scale='utc')
+    delta_years = (reference_epoch - catalog_epoch).to(u.year).value
 
     if "pmRA" in catalog.colnames and "pmDE" in catalog.colnames:
         print("Applying proper motion corrections...")
@@ -306,10 +370,12 @@ def fetch_catalog_vizier(ra_center, dec_center, box_width, box_height,
     # Check for missing columns and warn
     for column in ["Tmag", "Gmag", "BPmag", "RPmag"]:
         if column not in catalog.colnames:
-            print(f"Warning: Column {column} not found in catalog {catalog_id}.")
+            print(f"Warning: Column {column} not found in catalog {vizier_id}.")
 
     # Fix metadata before saving to FITS
     print("Cleaning metadata for FITS compatibility...")
+    catalog.meta["CATALOG"] = catalog_name
+    catalog.meta["MAGSYS"] = "G" if catalog_name == "gaia_dr3" else "TESS"
     if "description" in catalog.meta:
         catalog.meta["description"] = catalog.meta["description"][:70]
 
@@ -350,6 +416,4 @@ def fetch_catalog_vizier(ra_center, dec_center, box_width, box_height,
 if __name__ == "__main__":
     args = arg_parse()
     cat, cols, types = fetch_catalog_vizier(args.ra, args.dec, args.box_width, args.box_height,
-                                            args.epoch, args.output, args.blend_delta)
-
-
+                                            args.epoch, args.output, args.blend_delta, args.catalog)
