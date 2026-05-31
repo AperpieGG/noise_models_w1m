@@ -128,6 +128,7 @@ def grouped_star_arrays(table, aperture):
                 color = float(color_value)
         except (TypeError, ValueError):
             color = np.nan
+        mag_column = "MAG" if "MAG" in rows.colnames else "Tmag"
         stars[int(tic_id)] = {
             "tic_id": int(tic_id),
             "time": np.asarray(rows["jd_bary"], dtype=float),
@@ -135,6 +136,7 @@ def grouped_star_arrays(table, aperture):
             "fluxerr": np.asarray(rows[fluxerr_col], dtype=float),
             "sky": np.asarray(rows[sky_col], dtype=float) - flux,
             "tmag": float(rows["Tmag"][0]),
+            "mag": float(rows[mag_column][0]),
             "color": color,
             "x": float(np.nanmedian(rows["x"])),
             "y": float(np.nanmedian(rows["y"])),
@@ -153,9 +155,9 @@ def candidate_comps(stars, target_id, dmb, dmf, crop, color_lim, min_points):
             continue
         if star["n_points"] != min_points:
             continue
-        if star["tmag"] <= 9.4:
+        if star["mag"] <= 9.4:
             continue
-        if not (target["tmag"] - dmb <= star["tmag"] <= target["tmag"] + dmf):
+        if not (target["mag"] - dmb <= star["mag"] <= target["mag"] + dmf):
             continue
         if not np.isfinite(target["color"]) or not np.isfinite(star["color"]):
             continue
@@ -384,6 +386,9 @@ def write_results(results, phot_file, args):
     output = vstack(tables)
     output.meta["PHOTFILE"] = os.path.basename(phot_file)
     output.meta["NSTARS"] = len(results)
+    config = camera_config(args.cam)
+    output.meta["CATALOG"] = config["catalog"]
+    output.meta["MAGSYS"] = "G" if config["catalog"] == "gaia_dr3" else "TESS"
     output.write(lightcurve_path, overwrite=True)
 
     with open(summary_path, "w", encoding="utf-8") as handle:
