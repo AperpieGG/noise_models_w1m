@@ -188,6 +188,7 @@ What it does:
 - Writes the astrometric solution into the FITS header.
 - Optionally saves matched-catalog diagnostics.
 - Adds matched-source counts and WCS residual RMS to the nightly diagnostics.
+- Uses the default focused-source detection kernel unless `--defocus` is passed manually.
 
 Example:
 
