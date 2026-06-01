@@ -15,7 +15,6 @@ import subprocess
 import argparse as ap
 import sep
 import numpy as np
-import pymysql
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig")
 os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
@@ -61,9 +60,9 @@ def arg_parse():
                    default='.',
                    type=str)
     p.add_argument('--defocus',
-                   help='manual override for defocus (mm)',
+                   help='manual defocus value in mm (default: 0.0)',
                    type=float,
-                   default=None)
+                   default=0.0)
     p.add_argument('--force3rd',
                    help='force a 3rd order distortion polyfit',
                    action='store_true',
@@ -511,83 +510,6 @@ def catalog_magnitude_system(catalog):
     return 'G' if catalog.meta.get('CATALOG') == 'gaia_dr3' else 'TESS'
 
 
-def calculate_defocus_level(image):
-    """
-    Take an image and determine the level of defocus
-
-    Parameters
-    ----------
-    image : string
-        Name of input file
-
-    Returns
-    -------
-    defocus : float
-        Defocus in mm
-
-    Raises
-    ------
-    None
-    """
-    # get the time and camera_id from the image header
-    with fits.open(image) as ff:
-        obsstart = ff[0].header['OBSSTART'].replace('T', ' ')
-        camera_id = ff[0].header['CAMERAID']
-        focus = float(ff[0].header['FCSR_PHY'])
-
-    # query the current focus position first
-    qry = """
-        SELECT value
-        FROM config
-        WHERE attribute='focuser.position'
-        AND scope={}
-        AND valid_from < '{}'
-        """.format(camera_id, obsstart)
-
-    conn = pymysql.connect(host='10.2.4.244', db='ngts_ops', user='pipe')
-    try:
-        with conn.cursor() as cur:
-            cur.execute(qry)
-            res = cur.fetchone()
-
-        # this is a recent image if we get a hit here
-        if res:
-            configured_focus = float(res[0])
-            print("Image focus: {:.2f}".format(focus))
-            print("Configured focus: {:.2f}".format(configured_focus))
-            defocus = abs(configured_focus - focus)
-            print("Defocus: {:.2f}".format(defocus))
-        # otherwise we're pulling up a previously configured focus value
-        else:
-            qry = """
-                SELECT value
-                FROM config_history
-                WHERE attribute='focuser.position'
-                AND scope={}
-                AND valid_from < '{}'
-                AND valid_until > '{}'
-                """.format(camera_id, obsstart, obsstart)
-
-            with conn.cursor() as cur:
-                cur.execute(qry)
-                res = cur.fetchone()
-
-            if res:
-                configured_focus = float(res[0])
-                print("Image focus: {:.2f}".format(focus))
-                print("Configured focus: {:.2f}".format(configured_focus))
-                defocus = abs(configured_focus - focus)
-                print("Defocus: {:.2f}".format(defocus))
-            else:
-                print("Image focus: {:.2f}".format(focus))
-                print("No configured focus found, defaulting defocus to 0.0mm")
-                defocus = 0.0
-    finally:
-        conn.close()
-
-    return defocus
-
-
 def prepare_frame(input_path, output_path, catalog, defocus, force3rd, save_matched_cat, scale_min, scale_max):
     """
     Prepare the frame for WCS solution. The output is the solved image
@@ -677,13 +599,9 @@ def prepare_frame(input_path, output_path, catalog, defocus, force3rd, save_matc
                 print('No RA/DEC found in header (TELRAD, CMD_RA, or MNTRAD), skipping!')
                 return None, None, None, None
 
-    # determine if an image is defocused
-    # if defocused we need a new kernel for sep
-    # we query the config tables for the best focus at that time
-    # if the difference is > some fraction of a mm we use a new kernel
+    # Use the default source-detection kernel unless a manual defocus value was supplied.
     if defocus is None:
-        defocus = calculate_defocus_level(input_path)
-    # else, take the value supplied and use that manually overriden defocus
+        defocus = 0.0
 
     # store the defocus value in the header
     output.header['DEFOCUS'] = defocus
