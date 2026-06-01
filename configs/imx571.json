@@ -19,10 +19,10 @@
     "height": 2433
   },
   "scintillation": {
-    "diameter": 0.2,
+    "diameter": 0.5,
     "h": 2433,
     "H": 8000,
-    "c_Y": 1.56
+    "c_Y": 1.3
   },
   "workers": 1
 }
