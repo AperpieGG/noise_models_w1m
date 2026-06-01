@@ -447,6 +447,25 @@ def get_binning_from_header(header):
     return 1, 1
 
 
+def effective_scale_bounds(header, scale_min, scale_max):
+    """
+    Scale native unbinned astrometry bounds using the FITS detector binning.
+    """
+    bin_x, bin_y = get_binning_from_header(header)
+    if bin_x != bin_y:
+        print(f"Warning: non-square binning detected: {bin_x}x{bin_y}. "
+              "Using a search range that covers both axes.")
+
+    effective_min = scale_min * min(bin_x, bin_y)
+    effective_max = scale_max * max(bin_x, bin_y)
+    print(
+        f"Astrometry scale bounds: native={scale_min:.4f}-{scale_max:.4f} arcsec/px, "
+        f"binning={bin_x}x{bin_y}, "
+        f"effective={effective_min:.4f}-{effective_max:.4f} arcsec/px"
+    )
+    return effective_min, effective_max
+
+
 def fit_zeropoint_polynomial(catalog, objects, exptime, degree=2, sigma=3.0):
     """
     Fit a model of the zero point
@@ -673,8 +692,11 @@ def prepare_frame(input_path, output_path, catalog, defocus, force3rd, save_matc
     objects = _detect_objects_sep(frame_data_corr, frame_bg.globalrms, area_min,
                                   area_max, detection_sigma, defocus)
 
-    wcs_header = _wcs_from_table(objects, frame_data.shape, scale_min,
-                                 scale_max, estimate_coord, estimate_coord_radius)
+    effective_scale_min, effective_scale_max = effective_scale_bounds(
+        frame.header, scale_min, scale_max
+    )
+    wcs_header = _wcs_from_table(objects, frame_data.shape, effective_scale_min,
+                                 effective_scale_max, estimate_coord, estimate_coord_radius)
 
     if not wcs_header:
         print('Failed to find initial WCS solution - aborting')
