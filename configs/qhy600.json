@@ -12,7 +12,12 @@
   "dark_current": 0.0022,
   "read_noise": 2.579,
   "exposure": 10.0,
-  "phot_estimate_radius_deg": 3.0,
+  "phot_estimate_radius_deg": 10,
+  "photometry_mag_limit": 20,
+  "min_photometry_targets": 50,
+  "blend_separation_arcsec": 15,
+  "blend_delta": 1.0,
+  "calibration_rebin_mode": "sum",
   "location": {
     "lat": 28.7606,
     "lon": -17.8858,

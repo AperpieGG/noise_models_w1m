@@ -13,6 +13,10 @@
   "read_noise": 1.56,
   "exposure": 10.0,
   "phot_estimate_radius_deg": 3.0,
+  "photometry_mag_limit": 16.0,
+  "min_photometry_targets": 50,
+  "blend_separation_arcsec": 100.0,
+  "blend_delta": 1.0,
   "location": {
     "lat": -24.615662,
     "lon": -70.391809,

@@ -13,6 +13,10 @@
   "read_noise": 12.9,
   "exposure": 10.0,
   "phot_estimate_radius_deg": 3.0,
+  "photometry_mag_limit": 16.0,
+  "min_photometry_targets": 50,
+  "blend_separation_arcsec": 100.0,
+  "blend_delta": 1.0,
   "location": {
     "lat": -24.615662,
     "lon": -70.391809,
@@ -22,7 +26,7 @@
     "diameter": 0.2,
     "h": 2433,
     "H": 8000,
-    "c_Y": 1.56
+    "c_Y": 1.3
   },
   "workers": 4
 }
