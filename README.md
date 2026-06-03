@@ -52,6 +52,11 @@ Important fields:
   "read_noise": 1.56,
   "exposure": 10.0,
   "phot_estimate_radius_deg": 3.0,
+  "photometry_mag_limit": 16.0,
+  "min_photometry_targets": 50,
+  "blend_separation_arcsec": 100.0,
+  "blend_delta": 1.0,
+  "calibration_rebin_mode": "mean",
   "location": {
     "lat": -24.615662,
     "lon": -70.391809,
@@ -82,6 +87,13 @@ source ID and `Gmag` in the corresponding compatibility columns. Gaia runs
 measure and plot Gaia `G`-band zero points and magnitudes; TIC 8.2 runs use
 TESS magnitudes. If this setting changes, the wrapper rebuilds an existing
 field catalog on its next run.
+
+`photometry_mag_limit`, `blend_separation_arcsec`, and `blend_delta` control
+catalog retrieval and the final photometry-target selection.
+`min_photometry_targets` defaults to `50`; catalog generation stops with cut
+statistics and a clear error if fewer stars survive. For a sparse field,
+review the diagnostics before increasing the magnitude limit or relaxing the
+blend criteria.
 
 ## Full Pipeline
 
@@ -189,6 +201,9 @@ What it does:
 - Optionally saves matched-catalog diagnostics.
 - Adds matched-source counts and WCS residual RMS to the nightly diagnostics.
 - Uses the default focused-source detection kernel unless `--defocus` is passed manually.
+- Writes DS9 `.reg` circles using the `phot_aperture` radius from the camera
+  JSON. The region radius is expressed in image pixels so it matches aperture
+  photometry directly.
 
 Example:
 
@@ -244,6 +259,21 @@ What it does:
 - Builds or loads `master_dark.fits`.
 - Builds or loads `master_flat.fits`.
 - Applies bias, dark, and flat corrections through `reduce_image`.
+- Reads calibration-frame binning from `CAM-BIN`, `HBIN_SZ`/`VBIN_SZ`,
+  `XBINNING`/`YBINNING`, or `CCDXBIN`/`CCDYBIN` when available.
+- Rebins higher-resolution calibration masters to the science-image shape when
+  the dimensions are related by exact integer factors. If binning headers are
+  missing, it infers the factors from the array shapes. Incomplete high-edge
+  rows or columns that cannot form a final bin are trimmed when the
+  science-image header provides the expected binning factor.
+
+The camera JSON setting `calibration_rebin_mode` controls whether bias and dark
+masters use a block `"mean"` or block `"sum"` when rebinned. It defaults to
+`"mean"`. Flat masters always use a block mean because they are normalized
+response maps. A conversion such as 1x1 calibration data to 3x3 science data is
+supported; incompatible conversions such as 2x2 to 3x3 fail with an explicit
+error. The QHY600 config uses `"sum"` because its binned science-frame pedestal
+scales with the number of native pixels combined into each output pixel.
 
 ### `process_cmos_W1m.py`
 
@@ -258,6 +288,7 @@ What it does:
 - Runs aperture photometry with the configured aperture and gain.
 - Writes `phot_<OBJECT>.fits`.
 - Adds airmass, zero point, sky background, median source FWHM, and detected-source counts to the nightly diagnostics.
+- Skips frames without a finite zero point and reports the number rejected at the end of the run.
 
 This script supports workers across images.
 
@@ -275,7 +306,7 @@ What it does:
 
 - Selects comparison-star ensembles for each target.
 - Searches a grid of magnitude, color, and crop limits.
-- Chooses the comparison set with the lowest binned RMS.
+- Chooses the comparison set with the lowest unbinned RMS.
 - Writes `rel_phot_<OBJECT>.fits` and `rel_phot_<OBJECT>_summary.txt`.
 
 This script supports workers across target TIC IDs.
@@ -284,6 +315,26 @@ Example:
 
 ```bash
 python relative_process_W1m.py --cam configs/qhy600.json --workers 4
+```
+
+### `plot_relative_phot_W1m.py`
+
+Plots one relative light curve from a `rel_phot_*.fits` file.
+
+What it does:
+
+- Accepts a numeric source ID. For Gaia catalogs this is the Gaia source ID
+  stored in the pipeline `tic_id` column; for TIC catalogs this is the TIC ID.
+- Accepts either an observing-night directory or an explicit `rel_phot_*.fits`
+  file.
+- Uses the shared `plot_images()` plotting style.
+- Writes a PDF beside the input file unless `--output` is passed.
+
+Examples:
+
+```bash
+python plot_relative_phot_W1m.py 2127514115956226816 20250809
+python plot_relative_phot_W1m.py 2127514115956226816 20250809/rel_phot_Kepler\ 562.fits
 ```
 
 ### `noise_model_W1m.py`
@@ -321,6 +372,24 @@ Example:
 
 ```bash
 python plot_noise_model_W1m.py 20250809/noise_model_NG0719+0956_qhy600_bin1.json
+```
+
+### `plot_noise_ratio_W1m.py`
+
+Plots measured RMS divided by the total noise model for each source.
+
+What it does:
+
+- Reads a `noise_model_*.json` file.
+- Interpolates the total model noise at each source magnitude.
+- Plots `measured RMS / total model noise` against Gaia `G` or TESS magnitude.
+- Draws a horizontal reference line at ratio `1`.
+- Writes a PDF beside the input JSON unless `--output` is passed.
+
+Example:
+
+```bash
+python plot_noise_ratio_W1m.py 20250809/noise_model_Kepler\ 562_qhy600_bin1.json
 ```
 
 ### `utils_W1m.py`
