@@ -33,7 +33,7 @@ warnings.simplefilter('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=AstropyWarning, append=True)
 
 MAX_ALLOWED_PIXEL_SHIFT = 50
-N_OBJECTS_LIMIT = 200
+N_OBJECTS_LIMIT = 50
 DEFOCUS = 0.0
 AREA_MIN = 10
 AREA_MAX = 200
@@ -127,11 +127,30 @@ def process_frame(filename):
     phot_cat = context["phot_cat"]
     site_location = context["site_location"]
     mag_system = context["mag_system"]
+    calibration_rebin_mode = context["calibration_rebin_mode"]
 
-    reduced_data, frame_hdr, _ = reduce_image(filename, *masters, site_location=site_location)
+    reduced_data, frame_hdr, _ = reduce_image(
+        filename, *masters, site_location=site_location,
+        calibration_rebin_mode=calibration_rebin_mode
+    )
     frame_data = reduced_data
 
     airmass, zp = extract_airmass_and_zp(frame_hdr)
+    diagnostics = {
+        "date_obs": frame_hdr.get("DATE-OBS"),
+        "airmass": airmass,
+        "zp": zp,
+        "mag_system": mag_system,
+    }
+    if not np.isfinite(zp):
+        diagnostics.update({
+            "zp": "",
+            "photometry_status": "skipped",
+            "rejection_reason": "missing_zero_point",
+        })
+        return filename, None, (
+            f"Missing or invalid zero point for {filename}; skipping photometry."
+        ), diagnostics
 
     frame_bg = sep.Background(frame_data)
     bg_rms = frame_bg.rms()
@@ -142,17 +161,17 @@ def process_frame(filename):
 
     frame_objects = _detect_objects_sep(frame_data_corr_no_bg, frame_bg.globalrms,
                                         AREA_MIN, AREA_MAX, DETECTION_SIGMA, DEFOCUS)
-    diagnostics = {
-        "date_obs": frame_hdr.get("DATE-OBS"),
-        "airmass": airmass,
-        "zp": zp,
-        "mag_system": mag_system,
+    diagnostics.update({
         "sky_median": float(np.nanmedian(frame_bg.back())),
         "sky_rms": float(np.nanmedian(bg_rms)),
         "median_fwhm": float(np.nanmedian(frame_objects["FWHM"])),
         "n_detected": len(frame_objects),
-    }
+    })
     if len(frame_objects) < N_OBJECTS_LIMIT:
+        diagnostics.update({
+            "photometry_status": "skipped",
+            "rejection_reason": "too_few_detected_sources",
+        })
         return filename, None, (
             f"Fewer than {N_OBJECTS_LIMIT} objects found in {filename}, skipping photometry!"
         ), diagnostics
@@ -178,7 +197,8 @@ def process_frame(filename):
     frame_preamble = Table([frame_ids, phot_mag, phot_cat['Tmag'], phot_tic,
                             phot_bp, phot_rp, time_jd.value, time_bary.value,
                             phot_x, phot_y,
-                            [airmass] * len(phot_x), [zp] * len(phot_x)],
+                            np.full(len(phot_x), airmass, dtype=float),
+                            np.full(len(phot_x), zp, dtype=float)],
                            names=("frame_id", "MAG", "Tmag", "tic_id", "gaiabp", "gaiarp", "jd_mid",
                                   "jd_bary", "x", "y", "airmass", "zp"))
 
@@ -192,6 +212,10 @@ def process_frame(filename):
         f"Finished photometry for {filename}; "
         f"coord keys {ra_key}/{dec_key}: {estimate_coord.to_string('decimal')}"
     )
+    diagnostics.update({
+        "photometry_status": "accepted",
+        "rejection_reason": "",
+    })
     return filename, frame_output, message, diagnostics
 
 
@@ -228,6 +252,8 @@ def main():
     workers = max(1, args.workers if args.workers is not None else config["workers"])
     site_location = get_location(config)
     mag_system = "G" if config["catalog"] == "gaia_dr3" else "TESS"
+    calibration_rebin_mode = config["calibration_rebin_mode"]
+    missing_zp_count = 0
 
     # set directory for the current working directory
     directory = os.getcwd()
@@ -243,8 +269,8 @@ def main():
     logging.info(f"The prefixes are: {prefixes}")
     logging.info(f"Using {workers} image photometry worker(s).")
 
-    logging.info("Loading calibration masters once.")
-    masters = load_calibration_masters()
+    logging.info(f"Loading calibration masters once with {calibration_rebin_mode} rebin mode.")
+    masters = load_calibration_masters(calibration_rebin_mode)
 
     for prefix in prefixes:
         phot_output_filename = os.path.join(directory, f"phot_{prefix}.fits")
@@ -276,6 +302,7 @@ def main():
             "phot_cat": phot_cat,
             "site_location": site_location,
             "mag_system": mag_system,
+            "calibration_rebin_mode": calibration_rebin_mode,
         }
         init_worker(context)
         frame_results = process_frames(prefix_filenames, context, workers)
@@ -284,6 +311,8 @@ def main():
             logging.info(message)
             if diagnostics is not None:
                 update_frame_diagnostics(filename, **diagnostics)
+                if diagnostics.get("rejection_reason") == "missing_zero_point":
+                    missing_zp_count += 1
             if frame_table is not None:
                 phot_tables.append(frame_table)
 
@@ -298,6 +327,7 @@ def main():
             logging.info(f"No photometry data for prefix {prefix}.")
 
     plot_frame_diagnostics()
+    logging.info(f"Images skipped because the zero point was missing or invalid: {missing_zp_count}")
     logging.info("Done!")
 
 
