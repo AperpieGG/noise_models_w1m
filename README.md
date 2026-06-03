@@ -4,6 +4,13 @@ Photometry and noise-model pipeline for W1m FITS image sequences. The pipeline s
 
 ## Quick Start
 
+Before running the pipeline on a new machine, check the local Python packages
+and external tools:
+
+```bash
+python check_environment_W1m.py
+```
+
 Run the full pipeline from the repository root by passing a camera config and an observing-night directory:
 
 ```bash
