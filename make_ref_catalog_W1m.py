@@ -101,6 +101,14 @@ def arg_parse():
                         type=float,
                         default=1,
                         help='Maximum magnitude delta for a star to be considered as blended.')
+    parser.add_argument('--blend-separation-arcsec',
+                        type=float,
+                        default=100,
+                        help='Maximum separation in arcseconds for the blending check.')
+    parser.add_argument('--magnitude-limit',
+                        type=float,
+                        default=16,
+                        help='Faint magnitude limit for the VizieR query.')
     parser.add_argument('--catalog',
                         type=str,
                         default='tic82',
@@ -281,7 +289,9 @@ def query_vizier(center, width, height, catalog='IV/39/tic82'):
 
 
 def fetch_catalog_vizier(ra_center, dec_center, box_width, box_height,
-                         reference_epoch, output_path, blend_delta, catalog_id="tic82"):
+                         reference_epoch, output_path, blend_delta,
+                         blend_separation_arcsec=100, magnitude_limit=16,
+                         catalog_id="tic82"):
     """
     Fetch catalog from Vizier, apply proper motion corrections, perform blending checks,
     and output the catalog to a FITS file. Returns the processed catalog and metadata.
@@ -296,7 +306,7 @@ def fetch_catalog_vizier(ra_center, dec_center, box_width, box_height,
     Vizier.ROW_LIMIT = -1
     vizier_query = Vizier(
         columns=list(catalog_config["columns"]),
-        column_filters={catalog_config["magnitude_column"]: "<16"}
+        column_filters={catalog_config["magnitude_column"]: f"<{magnitude_limit}"}
     )
     vizier_query.ROW_LIMIT = -1  # Set the row limit after creating the Vizier instance
     try:
@@ -347,8 +357,7 @@ def fetch_catalog_vizier(ra_center, dec_center, box_width, box_height,
     start = Time.now()
     n_stars = len(ra_corr)
     blended = np.zeros(n_stars, dtype=bool)
-    # exclusion_radius = 100 * 0.22 / 3600.  # Radius in degrees for blending exclusion
-    exclusion_radius = 20 * 5 / 3600.  # Radius in degrees for blending exclusion
+    exclusion_radius = blend_separation_arcsec / 3600.
 
     for i in range(n_stars):
         if blended[i]:
@@ -376,6 +385,9 @@ def fetch_catalog_vizier(ra_center, dec_center, box_width, box_height,
     print("Cleaning metadata for FITS compatibility...")
     catalog.meta["CATALOG"] = catalog_name
     catalog.meta["MAGSYS"] = "G" if catalog_name == "gaia_dr3" else "TESS"
+    catalog.meta["BLENDSEP"] = blend_separation_arcsec
+    catalog.meta["BLENDDEL"] = blend_delta
+    catalog.meta["MAGLIMIT"] = magnitude_limit
     if "description" in catalog.meta:
         catalog.meta["description"] = catalog.meta["description"][:70]
 
@@ -416,4 +428,6 @@ def fetch_catalog_vizier(ra_center, dec_center, box_width, box_height,
 if __name__ == "__main__":
     args = arg_parse()
     cat, cols, types = fetch_catalog_vizier(args.ra, args.dec, args.box_width, args.box_height,
-                                            args.epoch, args.output, args.blend_delta, args.catalog)
+                                            args.epoch, args.output, args.blend_delta,
+                                            args.blend_separation_arcsec, args.magnitude_limit,
+                                            args.catalog)
