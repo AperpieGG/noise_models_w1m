@@ -79,6 +79,18 @@ def arg_parse():
                    help='Maximum plate scale in arcsec/px',
                    type=float,
                    default=4.5)
+    p.add_argument('--photometry-mag-limit',
+                   help='Faint magnitude limit for photometry targets',
+                   type=float,
+                   default=16.0)
+    p.add_argument('--min-photometry-targets',
+                   help='Minimum number of stars required in the photometry catalog',
+                   type=int,
+                   default=50)
+    p.add_argument('--phot-aperture',
+                   help='Photometry aperture radius in image pixels, used for DS9 regions',
+                   type=float,
+                   default=5.0)
     return p.parse_args()
 
 
@@ -842,7 +854,8 @@ def update_master_catalog(catalog, wcs_list, cat_file, ref_image):
     # keep a mask of images that have been on silicon
     on_chip = np.zeros(len(catalog['RA_CORR']))
 
-    # Default full unbinned image size
+    # FITS data dimensions are already expressed in stored image pixels,
+    # including any detector binning applied during acquisition.
     with fits.open(ref_image) as hdul:
         header = hdul[0].header
         data = hdul[0].data
@@ -861,9 +874,8 @@ def update_master_catalog(catalog, wcs_list, cat_file, ref_image):
         bin_x, bin_y = get_binning_from_header(header)
         print(f"Binning detected: {bin_x}x{bin_y}")
 
-    # Adjust image dimensions based on binning
-    IMAGE_WIDTH = FULL_WIDTH // bin_x
-    IMAGE_HEIGHT = FULL_HEIGHT // bin_y
+    IMAGE_WIDTH = FULL_WIDTH
+    IMAGE_HEIGHT = FULL_HEIGHT
 
     for w in wcs_list:
         if w is not None:
@@ -894,7 +906,24 @@ def update_master_catalog(catalog, wcs_list, cat_file, ref_image):
     return catalog, IMAGE_WIDTH, IMAGE_HEIGHT
 
 
-def write_input_catalog(catalog, wcs_list, input_cat_file, IMAGE_WIDTH, IMAGE_HEIGHT):
+def validate_input_catalog(input_catalog, min_photometry_targets):
+    """
+    Confirm that enough stars are available for relative photometry.
+    """
+    n_targets = len(input_catalog)
+    print(f"Selected photometry targets: {n_targets} "
+          f"(required minimum: {min_photometry_targets})")
+    if n_targets < min_photometry_targets:
+        raise ValueError(
+            f"Only {n_targets} photometry targets were selected; at least "
+            f"{min_photometry_targets} are required. Adjust photometry_mag_limit, "
+            "blend_separation_arcsec, or blend_delta in the camera JSON and rerun."
+        )
+
+
+def write_input_catalog(catalog, wcs_list, input_cat_file, IMAGE_WIDTH, IMAGE_HEIGHT,
+                        photometry_mag_limit=16.0, min_photometry_targets=50,
+                        phot_aperture=5.0):
     """
     Here we apply the cuts to the master catalog and
     then output the final input catalog for photometry
@@ -957,12 +986,21 @@ def write_input_catalog(catalog, wcs_list, input_cat_file, IMAGE_WIDTH, IMAGE_HE
     # Exclude stars with 'True' in the 'blended' column
     # blended_mask = np.array([not any(blend) for blend in catalog['blended']])
 
-    mask = np.where((catalog['Tmag'] < 16) & (catalog['on_chip'] == 1.0) & (~catalog['BLENDED']))[0]
+    mag_column = 'Gmag' if catalog_magnitude_system(catalog) == 'G' else 'Tmag'
+    magnitude_mask = np.isfinite(catalog[mag_column]) & (catalog[mag_column] < photometry_mag_limit)
+    on_chip_mask = catalog['on_chip'] > 0
+    unblended_mask = ~catalog['BLENDED']
+    mask = np.where(magnitude_mask & on_chip_mask & unblended_mask)[0]
 
     # mask the catalog and the source indexes
     catalog_clipped = catalog[mask]
     print(f'Initial catalog length: {len(catalog)}')
-    print(f'Blended, variable and faint stars removed: {len(catalog) - len(catalog_clipped)}')
+    print(f'Stars brighter than {mag_column}={photometry_mag_limit}: {np.sum(magnitude_mask)}')
+    print(f'Stars on chip: {np.sum(on_chip_mask)}')
+    print(f'Unblended stars: {np.sum(unblended_mask)}')
+    print(f'Photometry targets after all cuts: {len(catalog_clipped)}')
+    print(f'Blend separation: {catalog.meta.get("BLENDSEP", "unknown")} arcsec')
+    print(f'Blend magnitude delta: {catalog.meta.get("BLENDDEL", "unknown")}')
 
     # create the columns required for photometry, in the correct format
     input_catalog = Table([catalog_clipped['GAIA'], catalog_clipped['Gmag'], catalog_clipped['TIC'],
@@ -971,6 +1009,12 @@ def write_input_catalog(catalog, wcs_list, input_cat_file, IMAGE_WIDTH, IMAGE_HE
                            catalog_clipped['RPmag']])
     input_catalog.meta['CATALOG'] = catalog.meta.get('CATALOG', 'tic82')
     input_catalog.meta['MAGSYS'] = catalog_magnitude_system(catalog)
+    input_catalog.meta['MAGLIMIT'] = photometry_mag_limit
+    input_catalog.meta['MINTARGS'] = min_photometry_targets
+    input_catalog.meta['BLENDSEP'] = catalog.meta.get('BLENDSEP', -1)
+    input_catalog.meta['BLENDDEL'] = catalog.meta.get('BLENDDEL', -1)
+    input_catalog.meta['APERRAD'] = phot_aperture
+    validate_input_catalog(input_catalog, min_photometry_targets)
 
     # finally save the input catalog
     try:
@@ -981,7 +1025,7 @@ def write_input_catalog(catalog, wcs_list, input_cat_file, IMAGE_WIDTH, IMAGE_HE
         return None
 
 
-def generate_region_file(catalog, cat_file):
+def generate_region_file(catalog, cat_file, phot_aperture):
     """
     Take the master catalog and output some DS9 region files
 
@@ -1009,16 +1053,20 @@ def generate_region_file(catalog, cat_file):
 
     master_region = "{}_master.reg".format(cat_file.split('.fits')[0])
     master = []
+    mag_column = 'Gmag' if catalog_magnitude_system(catalog) == 'G' else 'Tmag'
+    mag_limit = catalog.meta.get('MAGLIMIT', 16.0)
 
     for row in catalog:
         ra = row['RA_CORR']
         dec = row['DEC_CORR']
         on_chip = row['on_chip']
-        tmag = row['Tmag']
+        magnitude = row[mag_column]
 
-        if on_chip and (tmag <= 16):
+        if on_chip and (magnitude <= mag_limit):
             colour = 'green'
-            master.append("circle({},{},4\") # color={}\n".format(ra, dec, colour))
+            master.append("circle({},{},{}i) # color={}\n".format(
+                ra, dec, phot_aperture, colour
+            ))
         else:
             colour = 'blue'
             master.append("point({},{}) # color={} point=x\n".format(ra, dec, colour))
@@ -1031,7 +1079,7 @@ def generate_region_file(catalog, cat_file):
             of.write(row)
 
 
-def generate_input_region_file(input_catalog, inp):
+def generate_input_region_file(input_catalog, inp, phot_aperture):
     """
     Take the input catalog and output some DS9 region files
 
@@ -1059,17 +1107,20 @@ def generate_input_region_file(input_catalog, inp):
 
     input_region = "{}.reg".format(inp.split('.fits')[0])
     input = []
+    mag_column = 'Gmag' if catalog_magnitude_system(input_catalog) == 'G' else 'Tmag'
+    mag_limit = input_catalog.meta.get('MAGLIMIT', 16.0)
 
     for row in input_catalog:
         ra = row['RA_CORR']
         dec = row['DEC_CORR']
         on_chip = row['on_chip']
-        tmag = row['Tmag']
-        gaiamag = row['Gmag']
+        magnitude = row[mag_column]
 
-        if on_chip and (tmag <= 16):
+        if on_chip and (magnitude <= mag_limit):
             colour = 'green'
-            input.append("circle({},{},4\") # color={}\n".format(ra, dec, colour))
+            input.append("circle({},{},{}i) # color={}\n".format(
+                ra, dec, phot_aperture, colour
+            ))
         else:
             pass  # don't plot the non-on-chip stars
 
@@ -1180,9 +1231,15 @@ if __name__ == "__main__":
             generate_input_catalog = (
                 existing_input_catalog.meta.get('CATALOG', 'tic82') != master_catalog.meta.get('CATALOG', 'tic82')
                 or catalog_magnitude_system(existing_input_catalog) != catalog_magnitude_system(master_catalog)
+                or existing_input_catalog.meta.get('MAGLIMIT') != args.photometry_mag_limit
+                or existing_input_catalog.meta.get('MINTARGS') != args.min_photometry_targets
+                or existing_input_catalog.meta.get('BLENDSEP') != master_catalog.meta.get('BLENDSEP', -1)
+                or existing_input_catalog.meta.get('BLENDDEL') != master_catalog.meta.get('BLENDDEL', -1)
+                or existing_input_catalog.meta.get('APERRAD') != args.phot_aperture
             )
 
         if not generate_input_catalog:
+            validate_input_catalog(existing_input_catalog, args.min_photometry_targets)
             print(f"{imcore_cat_name} already exists. Skipping generation and writing.")
         else:
             # update the master catalog with stars that are on chip
@@ -1192,13 +1249,17 @@ if __name__ == "__main__":
             # Write out some region files from the catalog
             # 1. The entire master catalog
             # 2. The stars going into the photometry, highlight guests
-            generate_region_file(master_catalog, args.cat_file)
+            generate_region_file(master_catalog, args.cat_file, args.phot_aperture)
 
             # Apply cuts and output the file for photometry
-            input_catalog = write_input_catalog(master_catalog, wcs_store, imcore_cat_name, IMAGE_WIDTH, IMAGE_HEIGHT)
+            input_catalog = write_input_catalog(
+                master_catalog, wcs_store, imcore_cat_name, IMAGE_WIDTH, IMAGE_HEIGHT,
+                args.photometry_mag_limit, args.min_photometry_targets,
+                args.phot_aperture
+            )
 
             # Generate the input region file
-            generate_input_region_file(input_catalog, imcore_cat_name)
+            generate_input_region_file(input_catalog, imcore_cat_name, args.phot_aperture)
 
         sys.exit(0)
     else:
