@@ -46,7 +46,7 @@ def arg_parse():
     return p.parse_args()
 
 
-def run_solver(script_dir, cat_file, fits_file, scale_min, scale_max, args):
+def run_solver(script_dir, cat_file, fits_file, scale_min, scale_max, config, args):
     """
     Run solve_ref_images_W1m.py for one FITS file.
     """
@@ -59,6 +59,12 @@ def run_solver(script_dir, cat_file, fits_file, scale_min, scale_max, args):
         str(scale_min),
         "--scale_max",
         str(scale_max),
+        "--photometry-mag-limit",
+        str(config["photometry_mag_limit"]),
+        "--min-photometry-targets",
+        str(config["min_photometry_targets"]),
+        "--phot-aperture",
+        str(config["phot_aperture"]),
     ]
     if args.save_matched_cat:
         cmd.append("--save_matched_cat")
@@ -121,10 +127,19 @@ if __name__ == "__main__":
     create_catalog = not os.path.exists(cat_file)
     if not create_catalog:
         with fits.open(cat_file) as hdulist:
-            existing_catalog = hdulist[1].header.get("CATALOG", "tic82").lower()
-        create_catalog = existing_catalog != config["catalog"].lower()
+            header = hdulist[1].header
+            existing_catalog = header.get("CATALOG", "tic82").lower()
+            existing_blend_separation = float(header.get("BLENDSEP", 100.0))
+            existing_blend_delta = float(header.get("BLENDDEL", 1.0))
+            existing_mag_limit = float(header.get("MAGLIMIT", 16.0))
+        create_catalog = (
+            existing_catalog != config["catalog"].lower()
+            or existing_blend_separation != config["blend_separation_arcsec"]
+            or existing_blend_delta != config["blend_delta"]
+            or existing_mag_limit != config["photometry_mag_limit"]
+        )
         if create_catalog:
-            print(f"Catalog source changed from {existing_catalog} to {config['catalog']}.")
+            print("Catalog source or blend settings changed; rebuilding the field catalog.")
 
     if create_catalog:
         print(f'Creating catalog file: {cat_file}')
@@ -139,6 +154,12 @@ if __name__ == "__main__":
             cat_file,
             "--catalog",
             config["catalog"],
+            "--blend-separation-arcsec",
+            str(config["blend_separation_arcsec"]),
+            "--blend-delta",
+            str(config["blend_delta"]),
+            "--magnitude-limit",
+            str(config["photometry_mag_limit"]),
         ]
         subprocess.run(cmd_args, check=True)
         print("Catalog created for image {} with prefix: {}\n".format(ref_image, prefix))
@@ -146,10 +167,10 @@ if __name__ == "__main__":
     # Solve reference image with catalog file
     if os.path.exists(cat_file):
         print(f'Solving reference image: {ref_image}')
-        result = run_solver(script_dir, cat_file, ref_image, scale_min, scale_max, args)
+        result = run_solver(script_dir, cat_file, ref_image, scale_min, scale_max, config, args)
 
-        if result != 0:  # Exit if the reference image fails to solve
-            print(f"Failed to solve the reference image {ref_image}. Exiting the script.")
+        if result != 0:  # Exit if reference solving or catalog validation fails
+            print(f"Reference image processing failed for {ref_image}. Exiting the script.")
             exit(1)
         else:
             print(f"Successfully solved the reference image {ref_image}.\n")
@@ -170,7 +191,7 @@ if __name__ == "__main__":
                             continue
 
                         print(f"Solving image {fits_file} for prefix: {prefix}\n")
-                        result = run_solver(script_dir, cat_file, fits_file, scale_min, scale_max, args)
+                        result = run_solver(script_dir, cat_file, fits_file, scale_min, scale_max, config, args)
 
                         if result != 0:
                             print(f"Failed to solve the image {fits_file}. Skipping to the next image.\n")
