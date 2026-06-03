@@ -26,7 +26,7 @@ from astropy.time import Time
 # pylint: disable=c-extension-no-member
 
 EXCLUDED_SCIENCE_WORDS = (
-    "bias", "dark", "flat", "morning", "evening", "catalog", "phot"
+    "bias", "dark", "flat", "morning", "evening", "catalog", "phot", "focussweep"
 )
 
 DEFAULT_LOCATION = {
@@ -57,6 +57,8 @@ FRAME_DIAGNOSTIC_FIELDS = (
     "shift_x",
     "shift_y",
     "shift_r",
+    "photometry_status",
+    "rejection_reason",
 )
 
 CATALOG_ALIASES = {
@@ -116,6 +118,16 @@ def camera_config(camera):
     config.setdefault("name", os.path.splitext(os.path.basename(path))[0])
     config.setdefault("workers", 1)
     config["catalog"] = normalize_catalog_name(config.get("catalog", "tic82"))
+    config.setdefault("photometry_mag_limit", 16.0)
+    config.setdefault("min_photometry_targets", 50)
+    config.setdefault("blend_separation_arcsec", 100.0)
+    config.setdefault("blend_delta", 1.0)
+    config["calibration_rebin_mode"] = config.get("calibration_rebin_mode", "mean").lower()
+    if config["calibration_rebin_mode"] not in ("mean", "sum"):
+        raise ValueError(
+            "calibration_rebin_mode must be either 'mean' or 'sum' in "
+            f"{path}"
+        )
     config.setdefault("location", DEFAULT_LOCATION.copy())
     config["location"] = {**DEFAULT_LOCATION, **config["location"]}
     config.setdefault("scintillation", DEFAULT_SCINTILLATION.copy())
@@ -1091,8 +1103,14 @@ def extract_airmass_zp(table, image_directory):
 
 def extract_airmass_and_zp(header):
     """Extract airmass and zero point from the FITS header."""
-    airmass = header.get('AIRMASS', None)
-    zp = header.get('MAGZP', header.get('MAGZP_T', header.get('MAGZP_G', None)))
+    def float_or_nan(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return np.nan
+
+    airmass = float_or_nan(header.get('AIRMASS'))
+    zp = float_or_nan(header.get('MAGZP', header.get('MAGZP_T', header.get('MAGZP_G'))))
     return airmass, zp
 
 
