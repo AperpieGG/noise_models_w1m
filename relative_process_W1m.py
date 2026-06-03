@@ -4,7 +4,7 @@ Build relative light curves from W1m photometry tables.
 
 The script searches a small grid of comparison-star selection limits, builds a
 weighted comparison ensemble for each trial, and keeps the trial with the
-lowest binned RMS. The aperture is fixed; it is not optimized here.
+lowest unbinned RMS. The aperture is fixed; it is not optimized here.
 """
 
 import argparse
@@ -213,7 +213,7 @@ def relative_lightcurve_for_trial(stars, target_id, params, args, aperture):
         binned_rms_ppm = float(np.nanstd(binned_flux) * 1e6)
 
     unbinned_rms_ppm = float(np.nanstd(rel_flux) * 1e6)
-    score = binned_rms_ppm
+    score = unbinned_rms_ppm
     if len(used_comps) < 5:
         score += (5 - len(used_comps)) * 100.0
 
@@ -367,7 +367,7 @@ def write_summary(handle, result):
     handle.write(f"Aperture: {result['aperture']}\n")
     handle.write(f"Binned RMS ppm: {result['binned_rms_ppm']:.3f}\n")
     handle.write(f"Unbinned RMS ppm: {result['unbinned_rms_ppm']:.3f}\n")
-    handle.write(f"Score: {result['score']:.3f}\n")
+    handle.write(f"Score (unbinned RMS ppm plus penalties): {result['score']:.3f}\n")
     handle.write(f"Parameters: {result['params']}\n")
     handle.write("Comparison stars:\n")
     for comp_id, weight, rms in zip(result["comp_ids"], result["comp_weights"], result["comp_rms"]):
