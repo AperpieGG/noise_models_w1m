@@ -227,7 +227,7 @@ What it does:
 - Moves images without WCS cards into `no_wcs/`.
 - Groups images by object prefix.
 - Uses Donuts to measure the shift of each image against the first image in its group.
-- Moves images with shifts of at least 1 pixel into `failed_donuts/`.
+- Moves images with shifts of at least 2 pixels into `failed_donuts/`.
 - Writes `logs/donuts.log` and `logs/donuts_pixel_shifts.pdf`.
 - Adds X/Y and radial image shifts to `logs/frame_diagnostics.csv`.
 
