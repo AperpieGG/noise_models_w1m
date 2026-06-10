@@ -18,6 +18,87 @@ class CalibrationMaster:
     kind: str
 
 
+def _calibration_block_rows(image_shape, n_files, target_mb=None):
+    """
+    Choose a row-block size that keeps the temporary median stack modest.
+    """
+    if target_mb is None:
+        target_mb = int(os.environ.get("W1M_CALIBRATION_STACK_MB", "256"))
+    height, width = image_shape
+    target_bytes = target_mb * 1024 * 1024
+    bytes_per_row = width * n_files * np.dtype(np.float32).itemsize
+    if bytes_per_row <= 0:
+        return height
+    return max(1, min(height, target_bytes // bytes_per_row))
+
+
+def _image_shape_from_header(header):
+    return int(header["NAXIS2"]), int(header["NAXIS1"])
+
+
+def _scaled_hdu_block(hdu, row_slice):
+    """
+    Read a FITS image row block and apply simple BSCALE/BZERO scaling.
+    """
+    header = hdu[0].header
+    raw_data = hdu[0].data[row_slice, :]
+    data = np.asarray(raw_data, dtype=np.float32)
+    blank = header.get("BLANK")
+    if blank is not None:
+        data = data.copy()
+        data[raw_data == blank] = np.nan
+    bscale = float(header.get("BSCALE", 1.0))
+    bzero = float(header.get("BZERO", 0.0))
+    if bscale != 1.0:
+        data *= bscale
+    if bzero != 0.0:
+        data += bzero
+    return data
+
+
+def _open_raw_image(filename):
+    return fits.open(filename, memmap=True, do_not_scale_image_data=True)
+
+
+def _chunked_median_master(files, label, calibrate_block=None):
+    """
+    Build a calibration master without storing the full frame stack in RAM.
+    """
+    with _open_raw_image(files[0]) as hdul:
+        image_shape = _image_shape_from_header(hdul[0].header)
+        header = hdul[0].header.copy()
+
+    block_rows = _calibration_block_rows(image_shape, len(files))
+    print(
+        f"Creating master {label} from {len(files)} files in "
+        f"{block_rows}-row blocks."
+    )
+    master = np.empty(image_shape, dtype=np.float32)
+
+    hdulists = [_open_raw_image(filename) for filename in files]
+    try:
+        for row_start in range(0, image_shape[0], block_rows):
+            row_stop = min(row_start + block_rows, image_shape[0])
+            row_slice = slice(row_start, row_stop)
+            stack = np.empty(
+                (len(files), row_stop - row_start, image_shape[1]),
+                dtype=np.float32,
+            )
+
+            for index, hdul in enumerate(hdulists):
+                data = _scaled_hdu_block(hdul, row_slice)
+                if calibrate_block is not None:
+                    data = calibrate_block(data, hdul[0].header, row_slice, index)
+                stack[index] = data
+
+            master[row_slice, :] = np.median(stack, axis=0)
+    finally:
+        for hdul in hdulists:
+            hdul.close()
+
+    return master, header
+
+
 def get_binning_from_header(header):
     """
     Return detector binning as (x, y), or None when the header does not say.
@@ -170,12 +251,7 @@ def bias():
             print('No bias files found. Skipping bias correction.')
             return None
         print('Creating master bias')
-        first_image_shape = fits.getdata(files[0]).shape
-        cube = np.zeros((*first_image_shape, len(files)))
-        for i, f in enumerate(files):
-            cube[:, :, i] = fits.getdata(f)
-        master_bias = np.median(cube, axis=2)
-        header = fits.getheader(files[0])
+        master_bias, header = _chunked_median_master(files, 'bias')
         fits.PrimaryHDU(master_bias, header=header).writeto(master_bias_path, overwrite=True)
         print(f'Master bias saved to: {os.path.join(os.getcwd(), "master_bias.fits")}')
         return CalibrationMaster(master_bias, header, 'bias')
@@ -192,19 +268,21 @@ def dark(master_bias, calibration_rebin_mode='mean'):
             print('No dark files found. Skipping dark correction.')
             return None
         print('Creating master dark')
-        first_image_shape = fits.getdata(files[0]).shape
-        cube = np.zeros((*first_image_shape, len(files)))
-        for i, f in enumerate(files):
-            dark_data, header = fits.getdata(f, header=True)
+        with _open_raw_image(files[0]) as hdul:
+            dark_shape = _image_shape_from_header(hdul[0].header)
+
+        def calibrate_dark_block(dark_data, header, row_slice, _index):
             if master_bias is not None:
-                dark_data = dark_data.astype(np.float64)
-                dark_data -= match_calibration_to_image(
-                    master_bias, dark_data.shape, header, 'bias',
+                matched_bias = match_calibration_to_image(
+                    master_bias, dark_shape, header, 'bias',
                     calibration_rebin_mode
-                )
-            cube[:, :, i] = dark_data
-        master_dark = np.median(cube, axis=2)
-        header = fits.getheader(files[0])
+                )[row_slice, :]
+                dark_data = dark_data - matched_bias
+            return dark_data
+
+        master_dark, header = _chunked_median_master(
+            files, 'dark', calibrate_dark_block
+        )
         fits.PrimaryHDU(master_dark, header=header).writeto(master_dark_path, overwrite=True)
         print(f'Master dark saved to: {os.path.join(os.getcwd(), "master_dark.fits")}')
         return CalibrationMaster(master_dark, header, 'dark')
@@ -222,23 +300,53 @@ def flat(master_bias, master_dark, dark_exposure=10, calibration_rebin_mode='mea
             return None
         print(f'Found {len(files)} flat files. Creating master flat.')
         files = files[:21]
-        cube = np.zeros((*fits.getdata(files[0]).shape, len(files)))
-        for i, f in enumerate(files):
-            data, header = fits.getdata(f, header=True)
-            data = data.astype(np.float64)  # or np.float32 to save memory
+        with _open_raw_image(files[0]) as hdul:
+            flat_shape = _image_shape_from_header(hdul[0].header)
+
+        flat_norms = []
+        for f in files:
+            with _open_raw_image(f) as hdul:
+                header = hdul[0].header
+                total = 0.0
+                count = 0
+                block_rows = _calibration_block_rows(flat_shape, 1)
+                for row_start in range(0, flat_shape[0], block_rows):
+                    row_stop = min(row_start + block_rows, flat_shape[0])
+                    row_slice = slice(row_start, row_stop)
+                    data = _scaled_hdu_block(hdul, row_slice)
+                    if master_bias is not None:
+                        data -= match_calibration_to_image(
+                            master_bias, flat_shape, header, 'bias',
+                            calibration_rebin_mode
+                        )[row_slice, :]
+                    if master_dark is not None:
+                        data -= match_calibration_to_image(
+                            master_dark, flat_shape, header, 'dark',
+                            calibration_rebin_mode
+                        )[row_slice, :] * header['EXPTIME'] / dark_exposure
+                    finite = np.isfinite(data)
+                    total += np.nansum(data)
+                    count += np.count_nonzero(finite)
+                flat_norms.append(total / count)
+
+        def calibrate_flat_block(data, header, row_slice, index):
             if master_bias is not None:
-                data -= match_calibration_to_image(
-                    master_bias, data.shape, header, 'bias',
+                matched_bias = match_calibration_to_image(
+                    master_bias, flat_shape, header, 'bias',
                     calibration_rebin_mode
-                )
+                )[row_slice, :]
+                data = data - matched_bias
             if master_dark is not None:
-                data -= match_calibration_to_image(
-                    master_dark, data.shape, header, 'dark',
+                matched_dark = match_calibration_to_image(
+                    master_dark, flat_shape, header, 'dark',
                     calibration_rebin_mode
-                ) * header['EXPTIME'] / dark_exposure
-            cube[:, :, i] = data / np.average(data)
-        master_flat = np.median(cube, axis=2)
-        header = fits.getheader(files[0])
+                )[row_slice, :]
+                data = data - matched_dark * header['EXPTIME'] / dark_exposure
+            return data / flat_norms[index]
+
+        master_flat, header = _chunked_median_master(
+            files, 'flat', calibrate_flat_block
+        )
         hdu = fits.PrimaryHDU(master_flat, header=header)
         hdu.writeto(os.path.join('.', 'master_flat.fits'), overwrite=True)
         with fits.open(os.path.join('.', 'master_flat.fits'), mode='update') as hdul:
@@ -287,9 +395,16 @@ def reduce_image(filename, master_bias=None, master_dark=None, master_flat=None,
         ) * hdr['EXPTIME'] / 10
     if master_flat is not None:
         print(f'Dividing by master flat from {filename}')
-        fd /= match_calibration_to_image(
+        matched_flat = match_calibration_to_image(
             master_flat, fd.shape, hdr, 'flat', calibration_rebin_mode
         )
+        bad_flat = (~np.isfinite(matched_flat)) | (matched_flat <= 0)
+        if np.any(bad_flat):
+            print(f'Masking {np.count_nonzero(bad_flat)} invalid master flat pixel(s)')
+            matched_flat = matched_flat.copy()
+            matched_flat[bad_flat] = np.nan
+        with np.errstate(invalid='ignore', divide='ignore'):
+            fd /= matched_flat
 
     return fd, hdr, os.path.basename(filename)
 
