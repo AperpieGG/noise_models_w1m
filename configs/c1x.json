@@ -4,7 +4,7 @@
   "scale_max": 0.5,
   "ra_key": "MNTRAD",
   "dec_key": "MNTDECD",
-  "box_size": 1,
+  "box_size": 3,
   "catalog": "gaia",
   "prefix_chars": null,
   "phot_aperture": 8,
