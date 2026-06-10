@@ -18,6 +18,7 @@ import shutil
 import logging
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig")
 os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
@@ -47,6 +48,7 @@ formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 warnings.simplefilter('ignore', category=UserWarning)
 
 DONUTS_WORKER = None
+MAX_ALLOWED_PIXEL_SHIFT = 2.0
 
 
 def log_path(filename):
@@ -189,17 +191,38 @@ def measure_group_shifts(reference_image, files_to_check, workers):
         return [measure_donuts_shift(filename) for filename in files_to_check]
 
     results = []
-    with ProcessPoolExecutor(
-        max_workers=workers,
-        initializer=init_donuts_worker,
-        initargs=(reference_image,),
-    ) as executor:
-        future_to_filename = {
-            executor.submit(measure_donuts_shift, filename): filename
-            for filename in files_to_check
-        }
-        for future in as_completed(future_to_filename):
-            results.append(future.result())
+    try:
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=init_donuts_worker,
+            initargs=(reference_image,),
+        ) as executor:
+            future_to_filename = {
+                executor.submit(measure_donuts_shift, filename): filename
+                for filename in files_to_check
+            }
+            for future in as_completed(future_to_filename):
+                filename = future_to_filename[future]
+                try:
+                    results.append(future.result())
+                except BrokenProcessPool:
+                    raise
+                except Exception as exc:
+                    results.append({
+                        "filename": filename,
+                        "date_obs": None,
+                        "shift_x": np.nan,
+                        "shift_y": np.nan,
+                        "error": str(exc),
+                    })
+    except BrokenProcessPool:
+        logger.error(
+            "Donuts worker process crashed while using %d workers. "
+            "Retrying this group with one worker.",
+            workers,
+        )
+        init_donuts_worker(reference_image)
+        results = [measure_donuts_shift(filename) for filename in files_to_check]
 
     results.sort(key=lambda row: files_to_check.index(row["filename"]))
     return results
@@ -271,7 +294,7 @@ def check_donuts(file_groups, workers=1):
             all_sx.append(sx)
             all_sy.append(sy)
 
-            if abs(sx) >= 1 or abs(sy) >= 1:
+            if abs(sx) >= MAX_ALLOWED_PIXEL_SHIFT or abs(sy) >= MAX_ALLOWED_PIXEL_SHIFT:
                 logger.warning(f'{i} image shift too big X: {sx} Y: {sy}')
                 if not os.path.exists('failed_donuts'):
                     os.mkdir('failed_donuts')
