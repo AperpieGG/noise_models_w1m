@@ -221,7 +221,13 @@ def process_frame(filename):
 
 def process_frames(prefix_filenames, context, workers):
     if workers <= 1:
-        return [process_frame(filename) for filename in prefix_filenames]
+        results = []
+        for filename in prefix_filenames:
+            try:
+                results.append(process_frame(filename))
+            except Exception as exc:
+                results.append((filename, None, f"Failed photometry for {filename}: {exc}", None))
+        return results
 
     results = []
     try:
