@@ -146,22 +146,74 @@ def _detect_objects_sep(data, background_rms, area_min, area_max,
                         [1, 3, 3, 3, 3, 3, 3, 1],
                         [1, 1, 1, 1, 1, 1, 1, 1]])
 
+    filter_kernel = None
+
     # check for defocus
     if defocus_mm >= 0.15 and defocus_mm < 0.3:
         print("Source detect using defocused kernel 1")
-        raw_objects = sep.extract(data, detection_sigma * background_rms,
-                                  minarea=area_min, filter_kernel=kernel1)
+        filter_kernel = kernel1
     elif defocus_mm >= 0.3 and defocus_mm < 0.5:
         print("Source detect using defocused kernel 2")
-        raw_objects = sep.extract(data, detection_sigma * background_rms,
-                                  minarea=area_min, filter_kernel=kernel2)
+        filter_kernel = kernel2
     elif defocus_mm >= 0.5:
         print("Source detect using defocused kernel 3")
-        raw_objects = sep.extract(data, detection_sigma * background_rms,
-                                  minarea=area_min, filter_kernel=kernel3)
+        filter_kernel = kernel3
     else:
         print("Source detect using default kernel")
-        raw_objects = sep.extract(data, detection_sigma * background_rms, minarea=area_min)
+
+    retry_sigmas = [detection_sigma, 5, 7, 10, 15, 20, 30, 50, 75, 100,
+                    150, 200, 300, 500, 750, 1000]
+    retry_sigmas = sorted(set(sigma for sigma in retry_sigmas if sigma >= detection_sigma))
+    raw_objects = None
+    used_detection_sigma = detection_sigma
+    max_active_pixels = 200000
+
+    for sigma in retry_sigmas:
+        threshold = sigma * background_rms
+        active_pixels = np.count_nonzero(data > threshold)
+        if active_pixels > max_active_pixels:
+            print(
+                f"SEP threshold {sigma} sigma leaves {active_pixels} active pixels; "
+                "retrying with a higher detection threshold"
+            )
+            continue
+        if active_pixels == 0:
+            raise RuntimeError(
+                "SEP source detection found no active pixels after raising "
+                f"the threshold to {sigma} sigma"
+            )
+        try:
+            if filter_kernel is None:
+                raw_objects = sep.extract(data, threshold, minarea=area_min)
+            else:
+                raw_objects = sep.extract(data, threshold, minarea=area_min,
+                                          filter_kernel=filter_kernel)
+            used_detection_sigma = sigma
+            if sigma != detection_sigma:
+                print(f"SEP source detection succeeded after raising threshold to {sigma} sigma")
+            break
+        except Exception as exc:
+            retryable_sep_error = (
+                isinstance(exc, MemoryError)
+                or "internal pixel buffer full" in str(exc)
+            )
+            if not retryable_sep_error:
+                raise
+            if sigma == retry_sigmas[-1]:
+                raise RuntimeError(
+                    "SEP source detection exceeded memory/pixel limits even at "
+                    f"{sigma} sigma"
+                ) from exc
+            print(
+                f"SEP source detection exceeded memory/pixel limits at {sigma} sigma; "
+                "retrying with a higher detection threshold"
+            )
+
+    if raw_objects is None:
+        raise RuntimeError(
+            "SEP source detection could not reduce active pixels below "
+            f"{max_active_pixels}; try rejecting this image or checking calibration"
+        )
 
     initial_objects = len(raw_objects)
 
@@ -174,7 +226,7 @@ def _detect_objects_sep(data, background_rms, area_min, area_max,
         raw_objects['ymax'] < data.shape[0] - trim_border
     ])])
 
-    print(detection_sigma * background_rms, initial_objects, len(raw_objects))
+    print(used_detection_sigma * background_rms, initial_objects, len(raw_objects))
 
     # Astrometry.net expects 1-index pixel positions
     objects = Table()
@@ -619,8 +671,12 @@ def prepare_frame(input_path, output_path, catalog, defocus, force3rd, save_matc
     output.header['DEFOCUS'] = defocus
 
     # Detect all objects in the image and attempt a full-frame solution
-    objects = _detect_objects_sep(frame_data_corr, frame_bg.globalrms, area_min,
-                                  area_max, detection_sigma, defocus)
+    try:
+        objects = _detect_objects_sep(frame_data_corr, frame_bg.globalrms, area_min,
+                                      area_max, detection_sigma, defocus)
+    except RuntimeError as exc:
+        print(f"Source detection failed: {exc}")
+        return None, None, None, None
 
     effective_scale_min, effective_scale_max = effective_scale_bounds(
         frame.header, scale_min, scale_max
